@@ -1,0 +1,6 @@
+!!ARBvp1.0
+# The RSX load's vertex program: the corners come in clip space already, so the position goes
+# through unchanged. cgcomp -v -a assembles this (the Makefile does it); its output was checked
+# against RPCS3's vertex program format: one vector MOV from input 0 to the position, end bit set.
+MOV result.position, vertex.position;
+END

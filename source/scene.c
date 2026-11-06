@@ -1,0 +1,257 @@
+#include "scene.h"
+
+#include <math.h>
+
+/* ASCII 32 (' ') to 96, seven rows each, bit 4 is the leftmost of five columns. TEE SPE Bench added
+   [ \ ] ^ _ (for paths like /DEV_HDD0) and draws '`' as a degree sign. */
+static const uint8_t FONT[65][7] = {
+	{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, /*   */
+	{ 0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04 }, /* ! */
+	{ 0x0A, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00 }, /* " */
+	{ 0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A }, /* # */
+	{ 0x04, 0x0F, 0x14, 0x0E, 0x05, 0x1E, 0x04 }, /* $ */
+	{ 0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03 }, /* % */
+	{ 0x0C, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0D }, /* & */
+	{ 0x04, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00 }, /* ' */
+	{ 0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02 }, /* ( */
+	{ 0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08 }, /* ) */
+	{ 0x00, 0x04, 0x15, 0x0E, 0x15, 0x04, 0x00 }, /* * */
+	{ 0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00 }, /* + */
+	{ 0x00, 0x00, 0x00, 0x00, 0x0C, 0x04, 0x08 }, /* , */
+	{ 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00 }, /* - */
+	{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C }, /* . */
+	{ 0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00 }, /* / */
+	{ 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E }, /* 0 */
+	{ 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E }, /* 1 */
+	{ 0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F }, /* 2 */
+	{ 0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E }, /* 3 */
+	{ 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 }, /* 4 */
+	{ 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E }, /* 5 */
+	{ 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E }, /* 6 */
+	{ 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 }, /* 7 */
+	{ 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E }, /* 8 */
+	{ 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C }, /* 9 */
+	{ 0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00 }, /* : */
+	{ 0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x04, 0x08 }, /* ; */
+	{ 0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02 }, /* < */
+	{ 0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00 }, /* = */
+	{ 0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08 }, /* > */
+	{ 0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04 }, /* ? */
+	{ 0x0E, 0x11, 0x17, 0x15, 0x17, 0x10, 0x0F }, /* @ */
+	{ 0x0E, 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11 }, /* A */
+	{ 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E }, /* B */
+	{ 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E }, /* C */
+	{ 0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C }, /* D */
+	{ 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F }, /* E */
+	{ 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10 }, /* F */
+	{ 0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F }, /* G */
+	{ 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 }, /* H */
+	{ 0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E }, /* I */
+	{ 0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C }, /* J */
+	{ 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 }, /* K */
+	{ 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F }, /* L */
+	{ 0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11 }, /* M */
+	{ 0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11 }, /* N */
+	{ 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E }, /* O */
+	{ 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 }, /* P */
+	{ 0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D }, /* Q */
+	{ 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 }, /* R */
+	{ 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E }, /* S */
+	{ 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 }, /* T */
+	{ 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E }, /* U */
+	{ 0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04 }, /* V */
+	{ 0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A }, /* W */
+	{ 0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11 }, /* X */
+	{ 0x11, 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04 }, /* Y */
+	{ 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F }, /* Z */
+	{ 0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E }, /* [ */
+	{ 0x00, 0x10, 0x08, 0x04, 0x02, 0x01, 0x00 }, /* \ */
+	{ 0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E }, /* ] */
+	{ 0x04, 0x0A, 0x11, 0x00, 0x00, 0x00, 0x00 }, /* ^ */
+	{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F }, /* _ */
+	{ 0x0C, 0x12, 0x12, 0x0C, 0x00, 0x00, 0x00 }, /* ` drawn as a degree sign */
+};
+
+/* 11 x 7, bit 10 is the leftmost column */
+static const uint16_t EYE[7] = { 0x0F8, 0x306, 0x471, 0x4F9, 0x471, 0x306, 0x0F8 };
+
+/* one rectangle per horizontal run of set bits */
+static void draw_bits(scene_rect_fn rect, void *ctx, int x, int y, int px, uint32_t rgb,
+                      const uint16_t *rows, int row_count, int bits)
+{
+	for (int r = 0; r < row_count; r++) {
+		int col = 0;
+		while (col < bits) {
+			if (!(rows[r] & (1u << (bits - 1 - col)))) {
+				col++;
+				continue;
+			}
+			int start = col;
+			while (col < bits && (rows[r] & (1u << (bits - 1 - col))))
+				col++;
+			rect(ctx, x + start * px, y + r * px, (col - start) * px, px, rgb);
+		}
+	}
+}
+
+static const uint8_t *glyph(char c)
+{
+	if (c >= 'a' && c <= 'z')
+		c = (char)(c - 'a' + 'A');
+	if (c < ' ' || c > '`')
+		c = '?';
+	return FONT[c - ' '];
+}
+
+int font_width(const char *text, int px)
+{
+	int n = 0;
+
+	while (text[n])
+		n++;
+	return n > 0 ? (n * 6 - 1) * px : 0;
+}
+
+int font_draw(scene_rect_fn rect, void *ctx, int x, int y, int px, uint32_t rgb, const char *text)
+{
+	int x0 = x;
+
+	for (; *text; text++, x += 6 * px) {
+		const uint8_t *g = glyph(*text);
+		uint16_t rows[7];
+
+		for (int r = 0; r < 7; r++)
+			rows[r] = g[r];
+		draw_bits(rect, ctx, x, y, px, rgb, rows, 7, 5);
+	}
+	return x - x0;
+}
+
+int scene_flash_on(uint64_t now_us, uint64_t epoch_us)
+{
+	return now_us >= epoch_us && (now_us - epoch_us) % 1000000 < SCENE_FLASH_US;
+}
+
+static float triangle(float x)
+{
+	float f = x - floorf(x);
+	return f < 0.5f ? f * 2.0f : 2.0f - f * 2.0f;
+}
+
+static int px_round(float v)
+{
+	return (int)(v + 0.5f);
+}
+
+void scene_draw(scene_rect_fn rect, void *ctx, int width, int height, uint32_t frame,
+                uint64_t now_us, uint64_t epoch_us, const char *const *lines, int line_count,
+                int viewers)
+{
+	static const uint32_t COLORS[8] = {
+		0xE74C3C, 0xF39C12, 0xF1C40F, 0x2ECC71, 0x1ABC9C, 0x3498DB, 0x9B59B6, 0xECF0F1
+	};
+	float u = height / 1080.0f;
+	float t = now_us >= epoch_us ? (float)((now_us - epoch_us) % 3600000000ULL) / 1e6f : 0.0f;
+	int text_px = height / 216 > 2 ? height / 216 : 2;   /* 5 px at 1080p: a 56-char line still fits */
+	int big_px = height / 72 > 1 ? height / 72 : 2;
+	char digits[12];
+
+	rect(ctx, 0, 0, width, height, 0x10141C);
+
+	/* a full-height bar sweeping at constant speed: tearing and dropped frames show up here */
+	{
+		int bar_w = px_round(48 * u);
+		rect(ctx, px_round((width - bar_w) * triangle(t * 0.25f)), 0, bar_w, height, 0x2A3550);
+	}
+
+	for (int i = 0; i < 8; i++) {
+		int size = px_round((90 + 10 * i) * u);
+		float sx = 0.11f + 0.037f * i, sy = 0.17f + 0.029f * i;
+		int x = px_round((width - size) * triangle(t * sx + i * 0.13f));
+		int y = px_round((height - size) * triangle(t * sy + i * 0.29f));
+		rect(ctx, x, y, size, size, COLORS[i]);
+	}
+
+	/* frame counter, and under it how far into the current second we are */
+	{
+		uint32_t n = frame;
+		int x = px_round(40 * u), y = px_round(40 * u);
+
+		for (int i = 5; i >= 0; i--) {
+			digits[i] = (char)('0' + n % 10);
+			n /= 10;
+		}
+		digits[6] = 0;
+		rect(ctx, x - big_px, y - big_px, font_width(digits, big_px) + 2 * big_px, 9 * big_px, 0x000000);
+		font_draw(rect, ctx, x, y, big_px, 0xFFFFFF, digits);
+
+		float second = now_us >= epoch_us ? (float)((now_us - epoch_us) % 1000000) / 1e6f : 0.0f;
+		int bar_full = font_width(digits, big_px);
+		rect(ctx, x, y + 9 * big_px, bar_full, px_round(10 * u) + 1, 0x303840);
+		rect(ctx, x, y + 9 * big_px, px_round(bar_full * second), px_round(10 * u) + 1, 0x3498DB);
+
+		/* who is watching: an eye and the number of browsers, green while there are any */
+		if (viewers >= 0) {
+			char count[8];
+			int len = 0, v = viewers > 999 ? 999 : viewers;
+			int ex = x + bar_full + 4 * big_px;
+
+			do {
+				count[len++] = (char)('0' + v % 10);
+				v /= 10;
+			} while (v);
+			for (int i = 0; i < len / 2; i++) {
+				char tmp = count[i];
+				count[i] = count[len - 1 - i];
+				count[len - 1 - i] = tmp;
+			}
+			count[len] = 0;
+			rect(ctx, ex - big_px, y - big_px, (13 + 6 * len) * big_px, 9 * big_px, 0x000000);
+			draw_bits(rect, ctx, ex, y, big_px, viewers > 0 ? 0x2ECC71 : 0x6A7480, EYE, 7, 11);
+			font_draw(rect, ctx, ex + 13 * big_px, y, big_px, 0xFFFFFF, count);
+		}
+	}
+
+	/* sync square: white together with the beep */
+	{
+		int size = px_round(150 * u);
+		int x = width - size - px_round(40 * u), y = px_round(40 * u);
+		rect(ctx, x, y, size, size, scene_flash_on(now_us, epoch_us) ? 0xFFFFFF : 0x262A30);
+		font_draw(rect, ctx, x + (size - font_width("SYNC", text_px)) / 2, y + size + 2 * text_px,
+		          text_px, 0x8090A0, "SYNC");
+	}
+
+	if (line_count > 0) {
+		int line_h = 10 * text_px;
+		int box_h = line_count * line_h + 2 * text_px;
+		int y = height - box_h - px_round(30 * u);
+		int box_w = 0;
+
+		for (int i = 0; i < line_count; i++) {
+			int lw = font_width(lines[i], text_px);
+			if (lw > box_w)
+				box_w = lw;
+		}
+		rect(ctx, px_round(30 * u), y, box_w + 4 * text_px, box_h, 0x000000);
+		for (int i = 0; i < line_count; i++)
+			font_draw(rect, ctx, px_round(30 * u) + 2 * text_px, y + 2 * text_px + i * line_h,
+			          text_px, i == 0 ? 0xFFFFFF : 0xB0C4D0, lines[i]);
+	}
+}
+
+void tone_fill(tone_state *state, float *out, uint32_t frames, int channels, uint32_t rate,
+               uint64_t pts_us, uint64_t epoch_us)
+{
+	const float two_pi = 6.283185307f;
+
+	for (uint32_t i = 0; i < frames; i++, state->sample++) {
+		uint64_t t = pts_us + (uint64_t)i * 1000000 / rate;
+		float phase = (float)(state->sample % rate) / (float)rate;
+		float v = 0.04f * sinf(two_pi * 330.0f * phase);
+
+		if (t >= epoch_us && (t - epoch_us) % 1000000 < SCENE_BEEP_US)
+			v += 0.35f * sinf(two_pi * 1000.0f * phase);
+		for (int c = 0; c < channels; c++)
+			out[i * channels + c] = v;
+	}
+}

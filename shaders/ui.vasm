@@ -1,0 +1,7 @@
+!!ARBvp1.0
+# The interface's vertex program (ui.c): the PPU writes every corner in clip space already, so the
+# position, the colour and the atlas coordinate go through unchanged. cgcomp -v -a assembles it.
+MOV result.position, vertex.position;
+MOV result.color, vertex.color;
+MOV result.texcoord[0], vertex.texcoord[0];
+END

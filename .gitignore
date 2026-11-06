@@ -1,0 +1,12 @@
+# build output
+build/
+spu/build/
+data/spu.bin
+*.elf
+*.self
+*.pkg
+*.map
+*.vpo
+# macOS
+.DS_Store
+dist/
