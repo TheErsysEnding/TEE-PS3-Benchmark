@@ -494,6 +494,32 @@ static float hint_key(float x, const char *key, const char *what)
 	return x + 44.0f;
 }
 
+/* The channel at the right end of the key help (V0.9), measured so it never runs into a hint: the name and
+   the link where there is room, in the hints' size or the small one, else the link alone, else nothing */
+#define CHANNEL_NAME  "TheErsysEnding"
+#define CHANNEL_LINK  "Linktr.ee/theersysending"
+static void channel(float x)
+{
+	static const char by[] = "by " CHANNEL_NAME, link[] = CHANNEL_LINK;
+	static const int styles[2] = { UI_BODY, UI_SMALL };
+	const float room = RIGHT - x;   /* x: where the next hint would go (44 px after the last one) */
+
+	for (int i = 0; i < 2; i++) {
+		float wb = ui_text_w(styles[i], by), wl = ui_text_w(styles[i], link), gap = 28.0f;
+
+		if (wb + gap + wl <= room) {
+			text_mid(RIGHT - wl - gap - wb, FOOT_Y, styles[i], K_DIM, by);
+			text_mid(RIGHT - wl, FOOT_Y, styles[i], K_ACCENT, link);
+			return;
+		}
+	}
+	for (int i = 0; i < 2; i++)
+		if (ui_text_w(styles[i], link) <= room) {
+			text_mid(RIGHT - ui_text_w(styles[i], link), FOOT_Y, styles[i], K_ACCENT, link);
+			return;
+		}
+}
+
 /* a coloured tag; returns where the next one goes */
 static float tag(float x, float cy, const char *s, uint32_t argb)
 {
@@ -778,7 +804,7 @@ static void draw_menu(uint64_t now)
 	int spus = bench_spus();
 	float r = RIGHT, x = LEFT, cy = 190.0f;
 
-	header("TEE PS3 Benchmark", VERSION, K_ACCENT, NULL);
+	header("TEE PS3 Benchmark", VERSION, K_ACCENT, "by " CHANNEL_NAME);   /* the channel: here its name, the link in the key help */
 	if (start_latency_ns > 0.0) {
 		snprintf(buf, sizeof(buf), "RAM %.0f ns", start_latency_ns);
 		r = chip(r, buf, 0, K_SOFT);
@@ -824,7 +850,7 @@ static void draw_menu(uint64_t now)
 	x = hint_button(x, UI_ICON_TRIANGLE, B_TRIANGLE, "Info");
 	x = hint_key(x, "L1 / R1", "PPU or SPEs");
 	x = hint_key(x, "SELECT", "Photo");
-	hint_key(x, "START", "Quit");
+	channel(hint_key(x, "START", "Quit"));
 }
 
 /* ---- the info pages ------------------------------------------------------------------------------- */
@@ -876,7 +902,7 @@ static void draw_info(void)
 	}
 	x = hint_button(LEFT, UI_ICON_CIRCLE_BTN, B_CIRCLE, "Back");
 	x = hint_key(x, "ARROWS", "Other test");
-	hint_key(x, "SELECT", "Photo");
+	channel(hint_key(x, "SELECT", "Photo"));
 }
 
 static void open_info(int entry, int back)
@@ -958,7 +984,7 @@ static void draw_results(uint64_t now)
 	x = hint_button(LEFT, UI_ICON_CIRCLE_BTN, B_CIRCLE, busy() ? "Stop" : "Back");
 	x = hint_button(x, UI_ICON_TRIANGLE, B_TRIANGLE, "Info");
 	x = hint_key(x, "SELECT", "Photo");
-	hint_key(x, "START", "Quit");
+	channel(hint_key(x, "START", "Quit"));
 }
 
 /* ---- the stress test ------------------------------------------------------------------------------ */
@@ -1095,7 +1121,7 @@ static void draw_stress_setup(const stress_status *s)
 	x = hint_key(x, "L1 / R1", "Duration");
 	x = hint_button(x, UI_ICON_CIRCLE_BTN, B_CIRCLE, "Back");
 	x = hint_button(x, UI_ICON_TRIANGLE, B_TRIANGLE, "Info");
-	hint_key(x, "SELECT", "Photo");
+	channel(hint_key(x, "SELECT", "Photo"));
 }
 
 /* a number in a card with its name over it and a line under it */
@@ -1370,7 +1396,7 @@ static void draw_stress_run(const stress_status *s, int run)
 		x = hint_button(LEFT, UI_ICON_CIRCLE_BTN, B_CIRCLE, "Cancel");
 	}
 	x = hint_button(x, UI_ICON_TRIANGLE, B_TRIANGLE, "Info");
-	hint_key(x, "SELECT", "Photo");
+	channel(hint_key(x, "SELECT", "Photo"));
 }
 
 static void draw_stress(void)
@@ -1779,7 +1805,8 @@ int main(void)
 	ioPadInit(PADS);
 	sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, on_sysutil, NULL);
 	log_open();
-	log_line("TEE PS3 Benchmark " VERSION " started: picture %dx%d, %s", gfx_width(), gfx_height(), gfx_selftest());
+	log_line("TEE PS3 Benchmark " VERSION " by " CHANNEL_NAME " (" CHANNEL_LINK ") started: picture %dx%d, %s", gfx_width(),
+	         gfx_height(), gfx_selftest());
 	if (rsx_start() != 0) {
 		/* a hung RSX takes every later frame, and the app with it once the command buffer is full (V9.0's
 		   second try froze the console): end at once, so the system resets the RSX */

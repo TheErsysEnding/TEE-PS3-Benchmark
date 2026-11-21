@@ -5,7 +5,8 @@
 // The look (since V0.5 BETA): near-black blue, the system font (SF Pro), and a gauge - a benchmark's needle near
 // the top of its scale, the arc running from the app's orange to a hot red-orange for the stress test's
 // heat. PIC1 puts the measured value in it (98 % of the Cell's peak, V8.4's 15-minute run) above a
-// faint performance curve; the XMB's menu covers the left and the middle, so the motif sits right.
+// faint performance curve; the XMB's menu covers the left and the middle, so the motif sits right. Under the
+// title PIC1 names the channel: "by TheErsysEnding" and Linktr.ee/theersysending.
 // No version number on either picture (V0.7: it would need updating with every release): the app shows its own.
 // The PNGs keep only IHDR, IDAT and IEND: plain 8-bit RGB, nothing extra for the XMB.
 import AppKit
@@ -170,7 +171,7 @@ func gauge(_ ctx: CGContext, centre c: CGPoint, radius r: CGFloat, width w: CGFl
     }
     // the needle: a slim tapered blade from the hub to just inside the arc
     let tip = point(c, r - w * (ticks ? 1.9 : 1.2), value), dir = angle(value) + .pi / 2
-    let base = w * 0.42, back = point(c, w * 0.9, value + 0.5)
+    let base = w * 0.42, back = point(c, w * 0.5, value + 0.5)   // the back end stays under the hub
     ctx.saveGState()
     ctx.setShadow(offset: .zero, blur: w * 0.8, color: rgb(0xFFFFFF, 0.35))
     ctx.setFillColor(rgb(0xFFFFFF))
@@ -268,4 +269,18 @@ render(1920, 1080, to: "pkgfiles/PIC1.PNG") { ctx in
     text(title, at: CGPoint(x: c.x - (ts.width - 2) / 2, y: 790), size: 64, weight: .heavy, colour: rgb(0xFFFFFF), kern: 2)
     centred("CELL  ·  RSX  ·  RAM     BENCHMARK AND STRESS TEST", x: c.x, y: 880, size: 26, weight: .semibold,
             colour: rgb(ice, 0.9), kern: 3)
+
+    // the channel (since V0.9): a short orange rule, then the name and the link on one line, under the title
+    // and inside the TV's safe area; the XMB's menu keeps to the left and the middle
+    ctx.setFillColor(mix(orange, hot, 0.5))
+    ctx.fill(CGRect(x: c.x - 60, y: 944, width: 120, height: 3))
+    let by = "by TheErsysEnding", dot = "   ·   ", link = "Linktr.ee/theersysending"
+    let wBy = textSize(by, size: 32, weight: .semibold).width, wDot = textSize(dot, size: 32, weight: .semibold).width
+    let wLink = textSize(link, size: 32, weight: .bold).width
+    var lx = c.x - (wBy + wDot + wLink) / 2
+    text(by, at: CGPoint(x: lx, y: 962), size: 32, weight: .semibold, colour: rgb(0xFFFFFF, 0.92))
+    lx += wBy
+    text(dot, at: CGPoint(x: lx, y: 962), size: 32, weight: .semibold, colour: rgb(ice, 0.7))
+    lx += wDot
+    text(link, at: CGPoint(x: lx, y: 962), size: 32, weight: .bold, colour: rgb(orange))
 }

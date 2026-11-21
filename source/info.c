@@ -166,7 +166,8 @@ static const char *const INFO_RESULTS[] = {
 	"PPU: float 39, integer 112 MB/s, memory 0.6 GB/s, total 209. 1 SPE: 945, 700 MB/s, 11.5 GB/s, total 2825. "
 	"6 SPEs: 5674, 4144 MB/s, 21.1 GB/s, total 11976.",
 	"#About",
-	"The text is set in Roboto by Google, under the Apache License 2.0.",
+	"TEE PS3 Benchmark is made by TheErsysEnding - find the channel and everything else at Linktr.ee/theersysending. "
+	"Open source under the MIT licence. The text is set in Roboto by Google, under the Apache License 2.0.",
 	NULL
 };
 

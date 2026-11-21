@@ -1,5 +1,7 @@
 # TEE PS3 Benchmark
 
+**by TheErsysEnding** · [Linktr.ee/theersysending](https://linktr.ee/theersysending)
+
 A benchmark and full-load stress test for the PlayStation 3, written in C with the open-source
 [PSL1GHT](https://github.com/ps3dev/PSL1GHT) SDK. It loads the Cell's PPU and all six SPEs, the RAM and
 the RSX graphics chip – and checks every single result.
@@ -110,7 +112,7 @@ Generated files are in the repository, so the build needs no other tools. To mak
 
 ## Credits and licences
 
-- Code: [MIT](LICENSE), © 2026 TheErsysEnding (TEE).
+- Code: [MIT](LICENSE), © 2026 TheErsysEnding (TEE) – channel and links: [Linktr.ee/theersysending](https://linktr.ee/theersysending).
 - Font: [Roboto](https://fonts.google.com/specimen/Roboto), © 2011 Google Inc., under the [Apache License 2.0](fonts/LICENSE). The app shows it as a texture atlas made from these files.
 - Built with [PSL1GHT](https://github.com/ps3dev/PSL1GHT) (MIT), which is not included here. The interface's "texture × colour" fragment program follows *tiny3d* by Hermes.
 - Tested with the [RPCS3](https://rpcs3.net) emulator, and on real hardware. The screenshots are from a PS3; in an emulator the clock, latency and RSX figures describe the host computer, not a PS3.
