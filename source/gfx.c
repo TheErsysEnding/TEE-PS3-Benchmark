@@ -55,6 +55,7 @@ static char selftest[64] = "SELF-TEST RUNNING";
 static u32 *cb_first_begin, *cb_first_end;   /* the first segment, as gcmInit set it up */
 static u32 cb_first_offset;
 static int stalls;
+static int rewind_stalls;   /* V1.0: the RSX did not reach the rewind's jump in time */
 static void (*frame_hook)(void);   /* the RSX load, between a flip and the wait for it */
 static volatile u32 sleeps;   /* every usleep while waiting on the RSX: each one wakes the PPU again */
 static s64 flip_us;           /* the last flip's time: the system's (gcmGetLastFlipTime), else when the PPU
@@ -224,6 +225,7 @@ static void cb_rewind(void)
 	while (ctrl->get != cb_first_offset) {
 		if (sysGetSystemTime() - start > WAIT_TIMEOUT_US) {
 			stalls++;
+			rewind_stalls++;
 			break;
 		}
 		usleep(30);
@@ -341,6 +343,11 @@ int gfx_stalls(void)
 	return stalls;
 }
 
+int gfx_rewind_stalls(void)
+{
+	return rewind_stalls;
+}
+
 uint32_t gfx_late_flips(void)
 {
 	return late_flips;
@@ -448,8 +455,10 @@ void *gfx_host_mem(u32 start, u32 size, u32 *offset)
 {
 	void *p = (u8 *)host_addr + start;
 
-	/* only between the command buffer and the capture buffers */
-	if (!host_addr || start < CB_SIZE || start + size > CAPTURE_OFFSET || rsxAddressToOffset(p, offset) != 0)
+	/* only between the command buffer and the capture buffers, or (V1.0) where capture buffers 1 and 2 would be:
+	   the bench takes its pictures with buffer 0 alone */
+	if (!host_addr || start < CB_SIZE || (start + size > CAPTURE_OFFSET && start < CAPTURE_OFFSET + CAPTURE_BYTES) ||
+	    start + size > HOST_SIZE || rsxAddressToOffset(p, offset) != 0)
 		return NULL;
 	return p;
 }

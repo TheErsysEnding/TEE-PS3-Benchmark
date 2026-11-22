@@ -13,6 +13,8 @@
 
 #include "bench.h"
 #include "bench_log.h"
+#include "err_info.h"
+#include "lv1_clock.h"
 #include "ntp.h"
 #include "rsx_load.h"
 #include "webman.h"
@@ -36,7 +38,8 @@ _Static_assert(STRESS_UNSEEN_BUCKETS == BENCH_UNSEEN_BUCKETS, "the same buckets"
 static stress_status st;
 static uint64_t rsx_base_mads, rsx_base_tiles, rsx_base_errors, rsx_base_checks, rsx_base_pixels, rsx_base_layers,
                 rsx_base_ferrors, rsx_base_fchecks, rsx_base_slices, rsx_base_verrors, rsx_base_pictures, rsx_base_fmads,
-                rsx_base_vmads, rsx_base_vbatches, rsx_base_vchecks, rsx_base_vert_errors;
+                rsx_base_vmads, rsx_base_vbatches, rsx_base_vchecks, rsx_base_vert_errors, rsx_base_cpixels,
+                rsx_base_cmads, rsx_base_cpasses, rsx_base_cslices, rsx_base_cerrors;
 static double rsx_base_tile_us, rsx_base_fill_us, rsx_base_span, rsx_base_idle, rsx_base_flip_wait, rsx_base_ts_tile,
               rsx_base_ts_fill;
 
@@ -44,7 +47,7 @@ static double rsx_base_tile_us, rsx_base_fill_us, rsx_base_span, rsx_base_idle, 
    RAM and those with the RSX */
 static int load_cpu(int load)
 {
-	return load != STRESS_RSX;
+	return load != STRESS_RSX && load != STRESS_VRAM && load != STRESS_RSX_VRAM;
 }
 
 static int load_heat(int load)
@@ -59,7 +62,28 @@ static int load_ram(int load)
 
 static int load_rsx(int load)
 {
-	return load == STRESS_RSX || load == STRESS_MAX_RSX || load == STRESS_ALL;
+	return load == STRESS_RSX || load == STRESS_VRAM || load == STRESS_RSX_VRAM || load == STRESS_MAX_RSX ||
+	       load == STRESS_ALL;
+}
+
+/* V1.0: the RSX load's mode: RSX core alone, VRAM alone, both (with the CPU loads too) */
+int stress_load_rsx_mode(int load)
+{
+	if (!load_rsx(load))
+		return -1;
+	return load == STRESS_RSX ? RSXMODE_CORE : load == STRESS_VRAM ? RSXMODE_VRAM : RSXMODE_BOTH;
+}
+
+/* the load's VRAM copy runs (its part is shown) */
+static int load_copy(int load)
+{
+	return stress_load_rsx_mode(load) >= RSXMODE_VRAM && rsxload_get()->copy_ok;
+}
+
+/* the load's shader tiles, fill and vertices run (VRAM: the fill only when the copy cannot) */
+static int load_core(int load)
+{
+	return load_rsx(load) && stress_load_rsx_mode(load) != RSXMODE_VRAM;
 }
 
 int stress_load_cpu(int load)
@@ -85,6 +109,13 @@ static int ppu_part(int part)
 int stress_rsx_wanted(void)
 {
 	return load_rsx(st.load) && st.phase == STRESS_RUNNING;
+}
+
+int stress_rsx_mode(void)
+{
+	int m = stress_load_rsx_mode(st.load);
+
+	return m < 0 ? RSXMODE_CORE : m;
 }
 
 /* the screen's frames while the load runs: the main thread adds, finish() reads once the load is off */
@@ -142,14 +173,16 @@ static int ppu_kind(int part, int load)
 
 const char *stress_load_name(int load)
 {
-	static const char *const NAMES[STRESS_LOADS] = { "MIXED", "MAX", "MAX+RAM", "RSX", "MAX+RSX", "ALL" };
+	static const char *const NAMES[STRESS_LOADS] = { "MIXED", "MAX", "MAX+RAM", "RSX", "VRAM", "RSX+VRAM", "MAX+RSX",
+	                                                 "ALL" };
 
 	return load >= 0 && load < STRESS_LOADS ? NAMES[load] : "?";
 }
 
 const char *stress_load_title(int load)
 {
-	static const char *const NAMES[STRESS_LOADS] = { "Mixed", "CPU max", "CPU + RAM", "RSX", "CPU + RSX", "Everything" };
+	static const char *const NAMES[STRESS_LOADS] = { "Mixed", "CPU max", "CPU + RAM", "RSX core", "VRAM", "RSX + VRAM",
+	                                                 "CPU + RSX", "Everything" };
 
 	return load >= 0 && load < STRESS_LOADS ? NAMES[load] : "?";
 }
@@ -157,11 +190,13 @@ const char *stress_load_title(int load)
 int stress_part_used(int part, int load)
 {
 	if (part == PART_RSX)
-		return load_rsx(load);
-	if (part == PART_RSX_FILL)
-		return load_rsx(load) && rsxload_get()->fill_ok;
+		return load_core(load);
+	if (part == PART_RSX_FILL)   /* V1.0: VRAM without the copy runs the plain fill instead */
+		return rsxload_get()->fill_ok && (load_core(load) || (load_rsx(load) && !load_copy(load)));
 	if (part == PART_RSX_VERT)
-		return load_rsx(load) && rsxload_get()->vert_ok;
+		return load_core(load) && rsxload_get()->vert_ok;
+	if (part == PART_RSX_COPY)
+		return load_copy(load);
 	if (!load_cpu(load))
 		return 0;
 	if (ppu_part(part))
@@ -183,6 +218,9 @@ const char *stress_part_name(int part, int load)
 		return "Fill (texture + blend)";
 	if (part == PART_RSX_VERT)
 		return "Vertices (MAD)";
+	if (part == PART_RSX_COPY)
+		return stress_load_rsx_mode(load) == RSXMODE_BOTH && rsxload_get()->copy_mads ? "VRAM copy + MAD" :
+		       "VRAM copy (read + write)";
 	if (ppu_part(part)) {
 		int kind = ppu_kind(part, load);
 		return kind == PPU_HEAT ? "Heat (VMX FMA)" : kind == PPU_MANDEL ? "Float (VMX Mandelbrot)" :
@@ -204,6 +242,8 @@ static void log_name(char *buf, size_t len, int part, int load)
 		snprintf(buf, len, "RSX fill (texture + blend, VRAM check)");
 	} else if (part == PART_RSX_VERT) {
 		snprintf(buf, len, "RSX vertices (vertex multiply-adds)");
+	} else if (part == PART_RSX_COPY) {
+		snprintf(buf, len, "RSX VRAM copy (read + write, checked)");
 	} else if (ppu_part(part)) {
 		int kind = ppu_kind(part, load);
 		snprintf(buf, len, "PPU thread %d %s", part - PART_PPU_1 + 1, kind == PPU_HEAT ? "heat (VMX FMA)" :
@@ -223,6 +263,8 @@ int stress_part_unit(int part, int load)
 	case PART_SPU_MEM:
 	case PART_SPU_RAM:
 		return UNIT_GB;
+	case PART_RSX_COPY:
+		return UNIT_GBD;
 	case PART_SPU_HEAT:
 	case PART_RSX:
 	case PART_RSX_VERT:
@@ -241,7 +283,7 @@ static double rate_of(int unit, double work, double us)
 		return 0.0;
 	if (unit == UNIT_ITER)
 		return work / us;
-	if (unit == UNIT_GFLOP || unit == UNIT_GPIX)
+	if (unit == UNIT_GFLOP || unit == UNIT_GPIX || unit == UNIT_GBD)
 		return work / us / 1000.0;
 	return work / 1.048576 / us;
 }
@@ -259,6 +301,8 @@ void stress_rate_text(char *buf, int len, int unit, double rate)
 		snprintf(buf, (size_t)len, "%.1f GFLOP/s", rate);
 	else if (unit == UNIT_GPIX)
 		snprintf(buf, (size_t)len, "%.2f Gpix/s", rate);
+	else if (unit == UNIT_GBD)
+		snprintf(buf, (size_t)len, "%.2f GB/s", rate);
 	else if (unit == UNIT_ITER)
 		snprintf(buf, (size_t)len, "%.0f M iter/s", rate);
 	else
@@ -268,7 +312,8 @@ void stress_rate_text(char *buf, int len, int unit, double rate)
 /* points per second as the benchmark counts them; heat: 1 per 10 MFLOP/s, fill: 1 per 0.25 M pixels/s */
 static double points_of(int unit, double rate)
 {
-	return unit == UNIT_GB ? rate / 10.0 : unit == UNIT_GFLOP ? rate * 100.0 : unit == UNIT_GPIX ? rate * 4000.0 : rate;
+	return unit == UNIT_GB ? rate / 10.0 : unit == UNIT_GFLOP || unit == UNIT_GBD ? rate * 100.0 :
+	       unit == UNIT_GPIX ? rate * 4000.0 : rate;
 }
 
 static void clock_text(char *buf, size_t len, uint64_t secs)
@@ -384,8 +429,12 @@ static void ppu_probe(void)
 		uint32_t wrong = (uint32_t)two[i].wrong + (i ? 0u : (uint32_t)one[0].wrong);
 
 		if (wrong) {
+			char at[64];
+
 			load_errors[i] += wrong;
-			log_line("ERROR in the stress test: PPU thread %d heat, %u of the probe's jobs wrong", i + 1, (unsigned)wrong);
+			err_context(at, sizeof(at), 0);
+			log_line("ERROR in the stress test: PPU thread %d heat, %u of the probe's jobs wrong%s", i + 1, (unsigned)wrong,
+			         at);
 		}
 	}
 	/* with both: only jobs while the other thread ran too - the first started alone, the last may end alone */
@@ -429,8 +478,12 @@ static void load_main(void *arg)
 		load_jobs[which]++;
 		if (!ok) {
 			load_errors[which]++;
-			if (logged++ < LOG_ERRORS)
-				log_line("ERROR in the stress test: %s, job %d wrong", name, i);
+			if (logged++ < LOG_ERRORS) {
+				char at[64];
+
+				err_context(at, sizeof(at), 0);
+				log_line("ERROR in the stress test: %s, job %d wrong%s", name, i, at);
+			}
 		}
 	}
 	sysThreadExit(0);
@@ -502,23 +555,33 @@ static void publish(const bench_mix_counts *c)
 
 		/* V0.9: the pixel units' multiply-adds - the shader tiles' and the fill pixels' (four floats, two
 		   operations each) */
-		st.work[PART_RSX] = ((r->mads - rsx_base_mads) + (r->fmads - rsx_base_fmads)) * 8;
+		st.work[PART_RSX] = ((r->mads - rsx_base_mads) + (r->fmads - rsx_base_fmads) + (r->cmads - rsx_base_cmads)) * 8;
+		st.errors[PART_RSX_COPY] = 0;
 		st.jobs[PART_RSX] = r->tiles - rsx_base_tiles;
 		st.errors[PART_RSX] = (uint32_t)(r->check_errors - rsx_base_errors);
 		st.work[PART_RSX_FILL] = r->pixels - rsx_base_pixels;
 		st.jobs[PART_RSX_FILL] = r->layers - rsx_base_layers;
-		st.errors[PART_RSX_FILL] = (uint32_t)((r->fill_errors - rsx_base_ferrors) + (r->vram_errors - rsx_base_verrors));
+		/* the texture's VRAM check goes with the copy where it runs, else with the fill */
+		st.errors[PART_RSX_FILL] = (uint32_t)(r->fill_errors - rsx_base_ferrors);
+		st.errors[load_copy(st.load) ? PART_RSX_COPY : PART_RSX_FILL] += (uint32_t)(r->vram_errors - rsx_base_verrors);
 		st.work[PART_RSX_VERT] = (r->vmads - rsx_base_vmads) * 8;
 		st.jobs[PART_RSX_VERT] = r->vbatches - rsx_base_vbatches;
 		st.errors[PART_RSX_VERT] = (uint32_t)(r->vert_errors - rsx_base_vert_errors);
+		/* V1.0: the copy - 8 bytes a pixel (read and written), its slices read back */
+		st.work[PART_RSX_COPY] = (r->copy_pixels - rsx_base_cpixels) * 8;
+		st.jobs[PART_RSX_COPY] = r->copy_passes - rsx_base_cpasses;
+		st.errors[PART_RSX_COPY] += (uint32_t)(r->copy_errors - rsx_base_cerrors);
+		st.copy_slices = r->copy_slices - rsx_base_cslices;
 		st.vram_slices = r->vram_slices - rsx_base_slices;
 		st.rsx_checks = (r->checks - rsx_base_checks) + (r->fill_checks - rsx_base_fchecks) + st.vram_slices +
-		                (r->vert_checks - rsx_base_vchecks);
+		                (r->vert_checks - rsx_base_vchecks) + st.copy_slices;
 		if (st.elapsed_us > 0) {
 			double s_ = (double)st.elapsed_us * 1e-6;
 
-			st.rsx_alu_pct = r->probe_gmad > 0.0 ? 100.0 * (double)((r->mads - rsx_base_mads) + (r->fmads - rsx_base_fmads)) /
-			                 s_ / (r->probe_gmad * 1e9) : 0.0;
+			st.rsx_alu_pct = r->probe_gmad > 0.0 ? 100.0 * (double)((r->mads - rsx_base_mads) + (r->fmads - rsx_base_fmads) +
+			                 (r->cmads - rsx_base_cmads)) / s_ / (r->probe_gmad * 1e9) : 0.0;
+			st.rsx_vram_pct = r->copy_gbs > 0.0 && load_copy(st.load) ? 100.0 * (double)(r->copy_pixels - rsx_base_cpixels) *
+			                  8.0 / s_ / (r->copy_gbs * 1e9) : 0.0;
 			st.rsx_rop_pct = r->blend_gpix > 0.0 ? 100.0 * (double)(r->pixels - rsx_base_pixels) / s_ / (r->blend_gpix * 1e9) :
 			                 0.0;
 			st.rsx_vert_pct = r->probe_vert_gmad > 0.0 && r->vert_ok ? 100.0 * (double)(r->vmads - rsx_base_vmads) / s_ /
@@ -526,6 +589,7 @@ static void publish(const bench_mix_counts *c)
 		}
 		st.rsx_tiles_per_picture = r->tiles_per_picture;
 		st.rsx_layers_per_picture = r->layers_per_picture;
+		st.rsx_copies_per_picture = r->copies_per_picture;
 		{
 			/* V0.8: by the RSX's own time stamps (all its work: the load, the screen, the copies) once a few
 			   pictures were timed; else by the probe's timings (the load's two parts only) */
@@ -547,6 +611,13 @@ static void publish(const bench_mix_counts *c)
 	}
 	for (int p = 0; p < STRESS_PARTS; p++)
 		errors += st.errors[p];
+	/* V1.0: the first error's time and part - where an overclock gives way first */
+	if (errors && st.first_error_part < 0) {
+		for (int p = 0; p < STRESS_PARTS && st.first_error_part < 0; p++)
+			if (st.errors[p])
+				st.first_error_part = p;
+		st.first_error_us = st.elapsed_us;
+	}
 	st.errors_total = errors;
 	/* against the time that went by on the PPU (timebase and decrementer count at the same rate) */
 	if (c->ticks_span) {
@@ -605,13 +676,14 @@ static void log_progress(uint64_t us)
 		n += snprintf(parts + n, sizeof(parts) - (size_t)n, " (busy %.1f %%, unseen %.1f %%); PPU %.1f + %.1f GFLOP/s",
 		              st.spu_busy_pct, st.spu_unseen_pct, average(PART_PPU_1, us), average(PART_PPU_2, us));
 		if (load_rsx(st.load))
-			snprintf(parts + n, sizeof(parts) - (size_t)n, "; RSX %.1f GFLOP/s + fill %.2f Gpix/s, busy %.1f %%, %.1f tiles + "
-			         "%.2f layers a picture", average(PART_RSX, us), average(PART_RSX_FILL, us), st.rsx_pct,
-			         st.rsx_tiles_per_picture, st.rsx_layers_per_picture);
-	} else if (st.load == STRESS_RSX)
-		snprintf(parts, sizeof(parts), "RSX %.1f GFLOP/s + fill %.2f Gpix/s, busy %.1f %% (shader %.0f + fill %.0f), %.1f "
-		         "tiles + %.2f layers a picture", average(PART_RSX, us), average(PART_RSX_FILL, us), st.rsx_pct,
-		         st.rsx_tile_pct, st.rsx_fill_pct, st.rsx_tiles_per_picture, st.rsx_layers_per_picture);
+			snprintf(parts + n, sizeof(parts) - (size_t)n, "; RSX %.1f GFLOP/s + fill %.2f Gpix/s + VRAM copy %.2f GB/s, busy "
+			         "%.1f %%", average(PART_RSX, us), average(PART_RSX_FILL, us), average(PART_RSX_COPY, us),
+			         st.rsx_pct);
+	} else if (load_rsx(st.load))
+		snprintf(parts, sizeof(parts), "RSX %.1f GFLOP/s + fill %.2f Gpix/s + VRAM copy %.2f GB/s, busy %.1f %% (shader "
+		         "%.0f + fill and copy %.0f), %.1f tiles + %.2f layers + %.2f copies a picture", average(PART_RSX, us),
+		         average(PART_RSX_FILL, us), average(PART_RSX_COPY, us), st.rsx_pct, st.rsx_tile_pct,
+		         st.rsx_fill_pct, st.rsx_tiles_per_picture, st.rsx_layers_per_picture, st.rsx_copies_per_picture);
 	else
 		snprintf(parts, sizeof(parts), "SPU %.0f M iter/s, %.0f MB/s, %.1f GB/s; PPU %.1f MB/s, %.0f M iter/s",
 		         average(PART_SPU_FLOAT, us), average(PART_SPU_INT, us), average(PART_SPU_MEM, us) / 1024.0,
@@ -634,6 +706,28 @@ static void duration_log(char *buf, size_t len, uint32_t secs)
 		snprintf(buf, len, "%u s", (unsigned)secs);
 	else
 		snprintf(buf, len, "%u min", (unsigned)(secs / 60));
+}
+
+/* V1.0 (5th build): the RSX's clocks during a test, as lv1 has them (stock: core 500 MHz, VRAM 650 MHz) */
+#define RSX_STOCK_CORE  500
+#define RSX_STOCK_VRAM  650
+
+static void range_add(int *lo, int *hi, int v)
+{
+	if (v <= 0)
+		return;   /* not known: left out */
+	if (*lo == 0 || v < *lo)
+		*lo = v;
+	if (v > *hi)
+		*hi = v;
+}
+
+static void clock_range(char *b, size_t n, int lo, int hi)
+{
+	if (lo == hi)
+		snprintf(b, n, "%d MHz", hi);
+	else
+		snprintf(b, n, "%d-%d MHz", lo, hi);
 }
 
 /* the verdict and the summary in the log */
@@ -677,6 +771,18 @@ static void finish(int hang, int hung_spu, uint32_t duration_s)
 		st.cell_mhz_real = st.cell_mhz * (1.0 + st.clock_dev_pct / 100.0);
 
 	log_line("Stress test result: %s", st.verdict);
+	/* V1.0: the stability, for overclockers - the first error's time and part, and how often they came */
+	if (st.first_error_part >= 0 && st.elapsed_us > 0) {
+		char when[16], what[64];
+		double minutes = (double)st.elapsed_us / 60e6;
+
+		clock_text(when, sizeof(when), st.first_error_us / 1000000);
+		log_name(what, sizeof(what), st.first_error_part, st.load);
+		log_line("  Stability: the first error came after %s, in the %s; %u errors in %s, %.1f a minute (an overclocked "
+		         "console: a step lower)", when, what, st.errors_total, a, minutes > 0.0 ? st.errors_total / minutes : 0.0);
+	} else if (st.elapsed_us > 0) {
+		log_line("  Stability: no error in %s - every result checked came out right", a);
+	}
 	for (int p = 0; p < STRESS_PARTS; p++) {
 		int unit = stress_part_unit(p, st.load);
 
@@ -685,7 +791,7 @@ static void finish(int hang, int hung_spu, uint32_t duration_s)
 		log_name(name, sizeof(name), p, st.load);
 		log_line("  %-40s %8llu jobs, %9.1f %s average, %u errors", name, (unsigned long long)st.jobs[p],
 		         average(p, st.elapsed_us), unit == UNIT_ITER ? "M iter/s" : unit == UNIT_GFLOP ? "GFLOP/s" :
-		         unit == UNIT_GPIX ? "Gpix/s" : "MB/s",
+		         unit == UNIT_GPIX ? "Gpix/s" : unit == UNIT_GBD ? "GB/s" : "MB/s",
 		         st.errors[p]);
 	}
 	if (st.clock_state == NTP_NO_SERVER || st.clock_state == NTP_OFF)
@@ -795,50 +901,73 @@ static void finish(int hang, int hung_spu, uint32_t duration_s)
 		const rsxload_status *r = rsxload_get();
 		double gf = average(PART_RSX, st.elapsed_us);
 
-		if (st.rsx_probe_gflops > 0.0)
-			log_line("  RSX heat: %.1f GFLOP/s on average in the pixel units (shader tiles and fill pixels), %.1f %% of the "
-			         "%.1f the shader did alone at the start (counting the multiply-adds only); %.1f tiles of %dx%d pixels a "
-			         "picture at the end", gf,
-			         100.0 * gf / st.rsx_probe_gflops, st.rsx_probe_gflops, st.rsx_tiles_per_picture, RSXLOAD_TILE,
-			         RSXLOAD_TILE);
-		else
+		log_line("  RSX load: %s", rsxload_mode_name(stress_load_rsx_mode(st.load)));
+		if (load_core(st.load) && st.rsx_probe_gflops > 0.0)   /* VRAM runs no shader tiles */
+			log_line("  RSX heat: %.1f GFLOP/s on average in the pixel units (shader tiles, fill and copy pixels), %.1f %% of "
+			         "the %.1f the shader did alone at the start (counting the multiply-adds only); %.1f tiles of %dx%d "
+			         "pixels a picture at the end", gf, 100.0 * gf / st.rsx_probe_gflops, st.rsx_probe_gflops,
+			         st.rsx_tiles_per_picture, RSXLOAD_TILE, RSXLOAD_TILE);
+		else if (load_core(st.load))
 			log_line("  RSX heat: %.1f GFLOP/s on average (no rate alone to compare: the probe did not measure it); %.1f "
 			         "tiles a picture", gf, st.rsx_tiles_per_picture);
 		if (st.rsx_timed) {
 			double pics = (double)(r->ts_pictures - rsx_base_pictures), span = r->ts_span_us - rsx_base_span;
 
 			log_line("  RSX busy: %.2f %% of the time by its own time stamps (%.0f pictures timed, %.1f a second, each "
-			         "staying %d TV frames) - shader %.1f %%, fill %.1f %%, screen and checks %.1f %%; it waited %.2f %% at "
+			         "staying %d TV frames) - shader %.1f %%, fill and copy %.1f %%, screen and checks %.1f %%; it waited %.2f %% at "
 			         "the flips (%.2f ms a picture) and %.2f %% elsewhere", st.rsx_pct, pics, pics * 1e6 / span,
 			         RSXLOAD_FRAMES, st.rsx_tile_pct, st.rsx_fill_pct, st.rsx_pct - st.rsx_tile_pct - st.rsx_fill_pct,
 			         st.rsx_flip_wait_pct, st.rsx_flip_wait_pct / 100.0 * span / pics / 1000.0,
 			         100.0 - st.rsx_pct - st.rsx_flip_wait_pct);
 			log_line("  RSX pacing: %u pictures came a frame late%s; at the end a margin of %.2f ms before the blank, the "
-			         "load %.1f ms a picture, a shader row %.3f us, a fill row %.3f us (the probe: %.3f and %.3f)",
-			         (unsigned)r->missed, r->timed ? "" : " (the time stamps stopped: set by the probe's timings at the end)",
+			         "load %.1f ms a picture, a shader row %.3f us, a fill or copy row %.3f us (the probe: %.3f and %.3f; "
+			         "%.0f %% of those rows copy rows)", (unsigned)r->missed,
+			         r->timed ? "" : " (the time stamps stopped: set by the probe's timings at the end)",
 			         r->margin_us / 1000.0, r->plan_us / 1000.0, r->unit_s_us, r->unit_f_us,
-			         r->probe_tile_us / RSXLOAD_TILE, r->probe_layer_us / RSXLOAD_FILL_H);
+			         r->probe_tile_us / RSXLOAD_TILE, r->mix_row_us, 100.0 * r->copy_frac);
 		} else if (r->probe_ok) {
-			log_line("  RSX busy: %.1f %% of the time by the probe's timings - shader %.1f %%, fill %.1f %% (its time "
+			log_line("  RSX busy: %.1f %% of the time by the probe's timings - shader %.1f %%, fill and copy %.1f %% (its time "
 			         "stamps %s); %u pictures came late, the load at %.0f %% of its plan at the end", st.rsx_pct,
 			         st.rsx_tile_pct, st.rsx_fill_pct, r->reports_ok ? "came too seldom" : "did not keep time",
 			         (unsigned)r->missed, 100.0 * r->scale);
 		}
-		if (st.rsx_alu_pct > 0.0 || st.rsx_rop_pct > 0.0)
+		if (st.rsx_alu_pct > 0.0 || st.rsx_rop_pct > 0.0 || st.rsx_vram_pct > 0.0)
 			log_line("  RSX units against what each managed alone at the start: pixel arithmetic %.1f %%, blending %.1f %%, "
-			         "vertex units %s", st.rsx_alu_pct, st.rsx_rop_pct, r->vert_ok && st.rsx_vert_pct > 0.0 ?
-			         "" : "(not measured)");
-		if (st.rsx_vert_pct > 0.0)
+			         "VRAM (the copy) %.1f %%, vertex units %s", st.rsx_alu_pct, st.rsx_rop_pct, st.rsx_vram_pct,
+			         r->vert_ok && st.rsx_vert_pct > 0.0 && load_core(st.load) ? "below" : "(not measured)");
+		if (st.rsx_vert_pct > 0.0 && load_core(st.load))
 			log_line("  RSX vertex units: %.1f %% of their rate alone", st.rsx_vert_pct);
-		if (r->vert_ok)
+		if (r->vert_ok && load_core(st.load))
 			log_line("  RSX vertices: %.1f GFLOP/s on average, %d batches of 4096 points behind each fill layer; %llu check "
 			         "tiles (a point a pixel, every fourth picture), %u of them different from the test's first",
 			         average(PART_RSX_VERT, st.elapsed_us), r->vert_batches,
 			         (unsigned long long)(r->vert_checks - rsx_base_vchecks), st.errors[PART_RSX_VERT]);
-		log_line("  RSX shader check tiles (%dx%d pixels, every fourth picture): %llu, %u of them different from the test's "
-		         "first%s", RSXLOAD_CHECK, RSXLOAD_CHECK, (unsigned long long)(r->checks - rsx_base_checks),
-		         st.errors[PART_RSX], r->pending ? "; some work was still queued at the end" : "");
-		if (r->fill_ok) {
+		if (load_core(st.load))
+			log_line("  RSX shader check tiles (%dx%d pixels, every fourth picture): %llu, %u of them different from the "
+			         "test's first%s", RSXLOAD_CHECK, RSXLOAD_CHECK, (unsigned long long)(r->checks - rsx_base_checks),
+			         st.errors[PART_RSX], r->pending ? "; some work was still queued at the end" : "");
+		if (load_copy(st.load)) {
+			double gb = average(PART_RSX_COPY, st.elapsed_us);   /* GB/s, 10^9 bytes */
+			int both = stress_load_rsx_mode(st.load) == RSXMODE_BOTH;
+
+			char against[96] = " (its rate alone was not measured)";
+
+			if (r->copy_gbs > 0.0)
+				snprintf(against, sizeof(against), ", %.1f %% of the plain copy alone (%.2f GB/s at the start)",
+				         st.rsx_vram_pct, r->copy_gbs);
+			log_line("  VRAM copy: %.2f GB/s on average (10^9 bytes; 4 read and 4 written a pixel)%s%s, %.2f copies of %d "
+			         "MB a picture at the end", gb, against, both && r->copy_mads ? ", with multiply-adds" : "",
+			         st.rsx_copies_per_picture, RSXLOAD_COPY * RSXLOAD_COPY * 4 >> 20);
+			if (both && r->copy_mads && r->copy_gbs > 0.0)
+				log_line("  VRAM copy + MAD: %d multiply-adds a pixel on the side (%.2f GB/s alone with them, %.0f %% of the "
+				         "plain copy)", r->copy_mads, r->copy_mad_gbs, 100.0 * r->copy_mad_gbs / r->copy_gbs);
+			else if (both && r->copy_mads)
+				log_line("  VRAM copy + MAD: %d multiply-adds a pixel on the side (not timed)", r->copy_mads);
+			log_line("  VRAM copy check: %llu slices of 64 KB read back (%.0f MB, the copy %.1f times), %llu wrong",
+			         (unsigned long long)st.copy_slices, (double)st.copy_slices / 16.0, (double)st.copy_slices / 256.0,
+			         (unsigned long long)(r->copy_errors - rsx_base_cerrors));
+		}
+		if (r->fill_ok && stress_part_used(PART_RSX_FILL, st.load)) {
 			double gp = average(PART_RSX_FILL, st.elapsed_us);
 
 			log_line("  RSX fill: %.2f G pixels a second on average%s, %.2f layers of %dx%d a picture at the end; %llu "
@@ -846,9 +975,15 @@ static void finish(int hang, int hung_spu, uint32_t duration_s)
 			         "was not measured)", st.rsx_layers_per_picture, RSXLOAD_FILL_W, RSXLOAD_FILL_H,
 			         (unsigned long long)(r->fill_checks - rsx_base_fchecks),
 			         (unsigned long long)(r->fill_errors - rsx_base_ferrors));
-			if (r->probe_gpix > 0.0)
-				log_line("  RSX fill against its rate alone (%.2f G pixels a second): %.1f %%", r->probe_gpix,
-				         100.0 * gp / r->probe_gpix);
+			/* against the time the fill rows had (its share of the RSX's time) */
+			if (r->probe_gpix > 0.0 && r->layer_us > 0.0 && st.rsx_fill_pct > 0.0 && load_core(st.load)) {
+				double alone = (double)RSXLOAD_FILL_W * RSXLOAD_FILL_H / (r->layer_us * 1000.0);
+
+				log_line("  RSX fill against its rate alone (%.2f G pixels a second): %.1f %% over the whole test", alone,
+				         100.0 * gp / alone);
+			}
+		}
+		if (r->fill_ok) {
 			if (r->vram_ok)
 				log_line("  VRAM check: %llu slices of 64 KB read back (%.0f MB, the %d MB texture %.1f times), %llu wrong",
 				         (unsigned long long)st.vram_slices, (double)st.vram_slices / 16.0,
@@ -857,6 +992,7 @@ static void finish(int hang, int hung_spu, uint32_t duration_s)
 			else
 				log_line("  VRAM check: off (its first slice did not come back right at the start)");
 		}
+		rsxload_errpat_log();   /* V1.0 (6th build): what the wrong words had in common */
 	}
 	/* what the screen takes from the PPU while the load runs: its busy time comes out of the load
 	   threads' (they run below everything else), and every sleep in a wait on the RSX wakes it again */
@@ -887,6 +1023,16 @@ static void finish(int hang, int hung_spu, uint32_t duration_s)
 	} else {
 		log_line("  Temperature: webMAN did not answer");
 	}
+	if (st.lv1_core_max > 0) {
+		char core[24], vram[24];
+		int stock = st.lv1_core_min == RSX_STOCK_CORE && st.lv1_core_max == RSX_STOCK_CORE &&
+		            st.lv1_vram_min == RSX_STOCK_VRAM && st.lv1_vram_max == RSX_STOCK_VRAM;
+
+		clock_range(core, sizeof(core), st.lv1_core_min, st.lv1_core_max);
+		clock_range(vram, sizeof(vram), st.lv1_vram_min, st.lv1_vram_max);
+		log_line("  RSX clocks (lv1, once a second): core %s, VRAM %s - %s", core, vram, stock ? "stock" :
+		         "not stock (a stock PS3: core 500 MHz, VRAM 650 MHz)");
+	}
 
 	snprintf(note, sizeof(note), "TEE PS3 Benchmark: stress test %s (%s, %u errors)", st.result == STRESS_PASSED ?
 	         "PASSED" : st.result == STRESS_FAILED ? "NOT passed" : "cancelled", a, st.errors_total);
@@ -900,7 +1046,7 @@ void stress_run(int load, uint32_t duration_s, const volatile int *quit)
 	uint64_t t0, now, end, next_second, next_log, second_at, prev_work[STRESS_PARTS];
 	uint32_t seen_errors[BENCH_KINDS] = { 0, 0, 0, 0, 0 }, last_errors = 0;
 	int have[2] = { 0, 0 }, spus = bench_spus(), hang = 0, shift = 0, logged = 0, fresh;
-	char a[24], name[64];
+	char a[24], name[64], at[64];
 	u64 ret;
 
 	memset(&st, 0, sizeof(st));
@@ -921,6 +1067,9 @@ void stress_run(int load, uint32_t duration_s, const volatile int *quit)
 	st.spus = spus;
 	st.history_step_s = 1;
 	st.temp_cpu_max = st.temp_rsx_max = st.fan_min = st.fan_max = -1;
+	st.lv1_core_min = st.lv1_core_max = st.lv1_vram_min = st.lv1_vram_max = 0;
+	st.first_error_part = -1;
+	st.first_error_us = 0;
 	st.timebase_mhz = (double)sysGetTimebaseFrequency() / 1e6;
 	stop = load_stop = 0;
 	st.phase = STRESS_PREPARING;
@@ -934,18 +1083,27 @@ void stress_run(int load, uint32_t duration_s, const volatile int *quit)
 		         "write 3 MB regions of the RAM and read them back, checked, and both PPU threads on the VMX "
 		         "heat kernel", a, spus);
 	else if (st.load == STRESS_RSX)
-		log_line("Stress test, %s, RSX load: the RSX's pixel pipelines on a shader of multiply-adds over %dx%d tiles "
+		log_line("Stress test, %s, RSX core load: the RSX's pixel pipelines on a shader of multiply-adds over %dx%d tiles "
 		         "(%s), on %dx%d layers of texture reads, multiply-adds and blending, on vertices, the VRAM read back - as "
 		         "much a picture as it gets through (a picture stays two TV frames), all checked; the Cell only feeds it",
 		         a, RSXLOAD_TILE, RSXLOAD_TILE,
 		         rsxload_variant_name(rsxload_get()->variant), RSXLOAD_FILL_W, RSXLOAD_FILL_H);
+	else if (st.load == STRESS_VRAM)
+		log_line("Stress test, %s, VRAM load: the RSX copies its %d MB texture texel for texel into a %dx%d target, as "
+		         "often as it gets through (4 bytes read and 4 written a pixel), slices of the copy and of the texture read "
+		         "back and checked; the Cell only feeds it", a, RSXLOAD_TEX * RSXLOAD_TEX * 4 >> 20, RSXLOAD_COPY,
+		         RSXLOAD_COPY);
+	else if (st.load == STRESS_RSX_VRAM)
+		log_line("Stress test, %s, RSX + VRAM load: the VRAM copy with %d multiply-adds a pixel on the side, the shader "
+		         "tiles and the computing fill layers - the graphics chip and its memory at once, all checked; the Cell only "
+		         "feeds it", a, rsxload_get()->copy_mads);
 	else if (st.load == STRESS_MAX_RSX)
-		log_line("Full-load stress test, %s, MAX+RSX load: %d SPEs and both PPU threads on their heat kernels, and the "
-		         "RSX's load (shader tiles, texture and blend layers, VRAM check) on top", a, spus);
+		log_line("Full-load stress test, %s, MAX+RSX load: %d SPEs and both PPU threads on their heat kernels, and RSX + "
+		         "VRAM on top (shader tiles, fill layers, the VRAM copy, all checked)", a, spus);
 	else if (st.load == STRESS_ALL)
 		log_line("Full-load stress test, %s, ALL: %d SPEs on the heat kernel while their DMA units write the RAM and "
-		         "read it back, both PPU threads on the VMX heat kernel, and the RSX's load (shader, fill, VRAM) - the whole "
-		         "console", a, spus);
+		         "read it back, both PPU threads on the VMX heat kernel, and RSX + VRAM (shader, fill, the VRAM copy) - the "
+		         "whole console", a, spus);
 	else
 		log_line("CPU full-load stress test, %s, MIXED load: %d SPEs (%d each on Mandelbrot, ChaCha20, memory, "
 		         "moving on every 10 s) and both PPU threads (ChaCha20 scalar, Mandelbrot VMX)", a, spus, spus / 3);
@@ -1046,6 +1204,11 @@ void stress_run(int load, uint32_t duration_s, const volatile int *quit)
 		rsx_base_fchecks = r->fill_checks;
 		rsx_base_slices = r->vram_slices;
 		rsx_base_verrors = r->vram_errors;
+		rsx_base_cpixels = r->copy_pixels;
+		rsx_base_cmads = r->cmads;
+		rsx_base_cpasses = r->copy_passes;
+		rsx_base_cslices = r->copy_slices;
+		rsx_base_cerrors = r->copy_errors;
 	}
 	count_part_spus(load_cpu(st.load) ? spus : 0);
 	ntp_begin();
@@ -1068,7 +1231,8 @@ void stress_run(int load, uint32_t duration_s, const volatile int *quit)
 		now = end = (uint64_t)sysGetSystemTime();
 		if (r < 0) {
 			hang = 1;
-			log_line("ERROR in the stress test: SPU %d has not answered for 10 s", c.hung_spu);
+			err_context(at, sizeof(at), 0);
+			log_line("ERROR in the stress test: SPU %d has not answered for 10 s%s", c.hung_spu, at);
 			break;
 		}
 		if (load_rsx(st.load)) {
@@ -1077,8 +1241,9 @@ void stress_run(int load, uint32_t duration_s, const volatile int *quit)
 
 			if (r2->active && tb > since && (double)(tb - since) / st.timebase_mhz > RSX_HANG_US) {
 				hang = st.rsx_hang = 1;
-				log_line("ERROR in the stress test: the RSX has not finished a picture's load for %.1f s (%d pictures queued)",
-				         (double)(tb - since) / st.timebase_mhz / 1e6, r2->pending);
+				err_context(at, sizeof(at), 1);
+				log_line("ERROR in the stress test: the RSX has not finished a picture's load for %.1f s (%d pictures "
+				         "queued)%s", (double)(tb - since) / st.timebase_mhz / 1e6, r2->pending, at);
 				break;
 			}
 		}
@@ -1087,11 +1252,12 @@ void stress_run(int load, uint32_t duration_s, const volatile int *quit)
 				seen_errors[t] = c.errors[t];
 				if (logged++ < LOG_ERRORS) {
 					log_name(name, sizeof(name), t, st.load);
+					err_context(at, sizeof(at), 0);
 					if (t == BENCH_HEAT_RAM)
 						log_line("ERROR in the stress test: %s on SPU %d, region %d came back different (%u bad "
-						         "12 KB pieces so far)", name, c.bad_spu, c.bad_job, c.errors[t]);
+						         "12 KB pieces so far)%s", name, c.bad_spu, c.bad_job, c.errors[t], at);
 					else
-						log_line("ERROR in the stress test: %s on SPU %d, job %d wrong", name, c.bad_spu, c.bad_job);
+						log_line("ERROR in the stress test: %s on SPU %d, job %d wrong%s", name, c.bad_spu, c.bad_job, at);
 				}
 			}
 		publish(&c);
@@ -1122,6 +1288,13 @@ void stress_run(int load, uint32_t duration_s, const volatile int *quit)
 			}
 			count_part_spus(load_cpu(st.load) ? spus : 0);
 			clock_update();
+			{
+				int core, vram;
+
+				lv1_clock_last(&core, &vram);
+				range_add(&st.lv1_core_min, &st.lv1_core_max, core);
+				range_add(&st.lv1_vram_min, &st.lv1_vram_max, vram);
+			}
 			if (webman_temps(&cpu, &rsx, &fan)) {
 				if (cpu > st.temp_cpu_max)
 					st.temp_cpu_max = cpu;
@@ -1158,7 +1331,8 @@ void stress_run(int load, uint32_t duration_s, const volatile int *quit)
 	   next test then took the old answers for its own and reported SPU 0 as hung) */
 	if (spus && load_cpu(st.load) && (!hang || st.rsx_hang) && bench_mix_finish(&c) != 0) {
 		hang = 1;
-		log_line("ERROR in the stress test: SPU %d stopped answering while finishing", c.hung_spu);
+		err_context(at, sizeof(at), 0);
+		log_line("ERROR in the stress test: SPU %d stopped answering while finishing%s", c.hung_spu, at);
 	}
 	/* the RSX finishes what it has queued (the main thread counts it) */
 	for (int k = 0; load_rsx(st.load) && !hang && rsxload_get()->pending && k < 100; k++)

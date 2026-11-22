@@ -21,7 +21,15 @@ STAGE=/tmp/ps3-benchmark-build
 mkdir -p "$STAGE"
 
 rsync -a --delete --exclude build/ --exclude '*.pkg' --exclude '*.self' --exclude '*.elf' \
-  "$ROOT/" "$STAGE/"
+  --exclude source/build_stamp.h "$ROOT/" "$STAGE/"
+
+# the start guard's build stamp: a hash of the sources (a part that stopped a start is left out by the same
+# build only; a new build tries it again). Written only when it changes, so make rebuilds no more than needed
+STAMP="$(cd "$ROOT" && cat Makefile source/*.c source/*.h spu/source/* shaders/* data/* 2>/dev/null | shasum -a 256 | cut -c1-16)"
+NEW="#define BUILD_STAMP \"$STAMP\""
+if [ "$(cat "$STAGE/source/build_stamp.h" 2>/dev/null)" != "$NEW" ]; then
+  echo "$NEW" > "$STAGE/source/build_stamp.h"
+fi
 
 make -C "$STAGE" "${@:-pkg}"
 

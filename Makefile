@@ -34,6 +34,19 @@ ifdef AUTOTEST
 # 12300 (ports 80 and 123 need root)
 CFLAGS		+=	-DBENCH_AUTOTEST -DWEBMAN_PORT=18080 -DNTP_TEST_IP=0x7F000001u -DNTP_PORT=12300
 endif
+ifdef LV1TEST
+# the lv1 clocks for RPCS3 (source/lv1_clock.c): stock, after 120 s 600/700, after 150 s 650/750; shown in RPCS3 too
+CFLAGS		+=	-DLV1_FAKE
+endif
+ifdef ERRTEST
+# wrong bits and dark patches now and then in the RSX checks' slots (source/rsx_load.c err_fake), for RPCS3
+CFLAGS		+=	-DERR_FAKE
+endif
+ifdef GUARDTEST
+# the start guard's test (RPCS3 empties /dev_hdd0/tmp at every start, so its notes go elsewhere): the first start
+# ends inside the VRAM copy's part as a frozen one would, the next must leave the copy out
+CFLAGS		+=	-DGUARD_DIR=\"/dev_hdd0/teebench-guard\" -DGUARD_TEST_STOP
+endif
 CXXFLAGS	=	$(CFLAGS)
 
 LDFLAGS		=	$(MACHDEP) -Wl,-Map,$(notdir $@).map

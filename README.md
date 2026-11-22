@@ -22,22 +22,25 @@ the RSX graphics chip – and checks every single result.
 | Endurance | The full test round after round, until stopped |
 | Results | Every score since the app started |
 
-**Stress test** with six loads and a duration from 20 s to endless:
+**Stress test** with eight loads and a duration from one minute to endless:
 
 | Load | What runs |
 |---|---|
 | Mixed | 2 SPEs each on Mandelbrot, ChaCha20 and memory, both PPU threads |
 | CPU max | Every SPE issues a fused multiply-add and a shuffle in every cycle; both PPU threads run a VMX heat kernel |
 | CPU + RAM | CPU max while the SPEs' DMA units write the RAM and read it back |
-| RSX | The graphics chip alone |
-| CPU + RSX | CPU max and the RSX load together |
-| Everything | CPU, RAM and RSX at once – the whole console |
+| RSX core | The graphics chip's shader, fill and blending |
+| VRAM | The RSX copies a 16 MB texture texel for texel into a second 16 MB, as fast as the graphics memory goes |
+| RSX + VRAM | The copy computes on the side, with the shader and the fill – the graphics chip and its memory at once |
+| CPU + RSX | CPU max and RSX + VRAM together |
+| Everything | CPU, RAM, RSX and VRAM at once – the whole console |
 
-The **RSX load**:
+The **RSX loads**:
 - A pixel shader of multiply-adds, in the fastest of four register layouts (about 97 % of the RSX's arithmetic peak on its own).
 - Full-screen layers that read a 16 MB texture, compute and blend. They go into a tiled render target when that is faster. The number of multiply-adds per pixel is chosen at start, so that the arithmetic units and the blending are busiest together.
+- The VRAM copy, plain or with multiply-adds per pixel; every 64 KB of the copy is read back and checked.
 - An optional vertex load. It is only used when it really runs alongside the pixels.
-- A VRAM read-back check.
+- A VRAM read-back check of the texture.
 
 **Pacing by the RSX's own clock.** While the RSX load runs, a picture stays for two TV frames. The load is set from the RSX's own time stamps, so that the RSX reaches the next flip a fraction of a millisecond before the vertical blank. A stock PS3 shows about 99 % RSX busy, measured, not estimated.
 
@@ -45,22 +48,32 @@ The **RSX load**:
 - Reference checksums for every job.
 - Bit-exact check tiles for the shader, the fill and the vertices; one pixel of each is also recomputed on the PPU.
 - RAM patterns checked byte for byte.
-- The VRAM compared with what the PPU wrote.
+- The VRAM, the texture and its copy, compared with what the PPU wrote.
 
 An error turns the screen red and goes into the log.
+
+**For overclockers:**
+- The **RSX core and VRAM clocks** are read from lv1 once a second (read only, the same registers webMAN MOD shows). The screen always shows the current clocks, and the log notes every change.
+- **Every error line names its moment**, for example `- at RSX 73 C, core 700 MHz, VRAM 750 MHz`.
+- **Every stress test ends with each check's error pattern**: which bits failed, 0 → 1 or 1 → 0, and in which word of a 16-byte memory word (the VRAM bus is 128 bits wide). When the same place fails again and again, the log says so.
+- Each result names the clocks the test ran at, when the first error came and in which part.
+- Errors don't stop a test, so it shows the whole picture.
 
 **Live data:**
 - Throughput and history for each part.
 - SPU busy, RSX busy and the share of each RSX unit.
-- The Cell clock, measured by the SPEs.
+- The Cell clock, measured by the SPEs, and the RSX core clock, measured from the shader's rate.
+- The RSX and VRAM clocks from lv1.
 - RAM latency.
 - The timer against an NTP time server.
 - CPU and RSX temperatures and the fan speed via webMAN MOD.
 
 **Safety:**
-- The app never changes a clock or the fan, and never touches `dev_flash`.
+- The app never changes a clock or the fan, and never touches `dev_flash`. It only reads the clocks.
 - The stress test stops at 85 °C (CPU or RSX).
 - Every new kind of RSX work goes through a self-test first. If the RSX does not answer, the app ends instead of leaving a hung graphics chip behind.
+- **Safe start:** during the start the log is written to the disk line by line, and each part of the start is noted. A part that stopped a start (for example a frozen console) is left out the next time, with a red note on the screen; a new version tries it again.
+- In an emulator the app says so ("Emulator - host figures") instead of showing clocks no PS3 has.
 
 ![RSX stress test on a PS3](docs/screenshots/rsx-stress-ps3.png)
 
@@ -68,6 +81,7 @@ An error turns the screen red and goes into the log.
 
 - A PlayStation 3 that runs homebrew (custom firmware or HEN). Developed and tested on a PS3 with custom firmware 4.9x.
 - Optional: [webMAN MOD](https://github.com/aldostools/webMAN-MOD), for the temperatures, the fan speed and the on-screen notifications.
+- Optional: a custom firmware with lv1 peek (Cobra / Evilnat, syscall 11), for the RSX and VRAM clocks from lv1. Without it, the app shows the measured core clock and the copy's GB/s.
 - Optional: a network connection, for the clock check against `pool.ntp.org`.
 
 ## Install
@@ -107,6 +121,14 @@ Generated files are in the repository, so the build needs no other tools. To mak
 | `tools/pace_sim.c` | Tries the RSX pacing (`source/rsx_pace.c`) against a simulated RSX on a computer |
 
 `./build.sh pkg AUTOTEST=1` builds a version that presses its own buttons, for the RPCS3 emulator. It expects stand-ins for webMAN on `127.0.0.1:18080` and for the time server on `127.0.0.1:12300`; they are not included. In an emulator the timings mean nothing, but the checks, the self-tests and the screenshots do.
+
+More test builds for RPCS3 (each together with `AUTOTEST=1`):
+
+| Flag | What it does |
+|---|---|
+| `LV1TEST=1` | Fakes the lv1 clock registers (stock, then 600/700, then 650/750 MHz) and shows the clocks in the emulator |
+| `ERRTEST=1` | Puts wrong bits and dark patches into the RSX checks now and then, to check the error lines and patterns |
+| `GUARDTEST=1` | Ends the first start inside the VRAM copy, as a frozen start would; the next start must leave it out |
 
 [docs/PSL1GHT-NOTES.md](docs/PSL1GHT-NOTES.md) lists the PSL1GHT and RSX pitfalls found while writing this app.
 

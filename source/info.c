@@ -21,7 +21,7 @@ static const char *const DESCS[M_ENTRIES] = {
 	"Float, integer and memory in a row",
 	"PPU, then 1 to 6 SPEs - about a minute",
 	"The full test round after round",
-	"CPU, RAM and RSX at full load",
+	"CPU, RAM, RSX and VRAM at full load",
 	"Every score since the app started"
 };
 
@@ -131,21 +131,22 @@ static const char *const INFO_FULLLOAD[] = {
 	"Mixed: 2 SPEs each on Mandelbrot, ChaCha20 and memory, moving on every 10 s; PPU thread 1 ChaCha20, thread 2 "
 	"Mandelbrot on VMX. CPU max: every SPE issues a fused multiply-add and a shuffle in every cycle, both PPU "
 	"threads run a VMX heat kernel. CPU + RAM: the same while the SPEs' DMA units write the RAM and read it back "
-	"at full speed. RSX: the graphics chip alone - a shader of multiply-adds (the fastest of four register "
-	"layouts), full-screen layers of texture reads and blending that compute as well (like heavy game effects), "
-	"vertices for its vertex units, and the VRAM read back. "
-	"CPU + RSX and Everything (CPU, RAM and RSX): the whole console at once.",
+	"at full speed. RSX core: a shader of multiply-adds (the fastest of four register layouts), full-screen layers "
+	"of texture reads, multiply-adds and blending, vertices. VRAM: the 16 MB texture copied texel for texel into a "
+	"second 16 MB, as fast as the graphics memory goes. RSX + VRAM: the copy computes on the side, with shader and "
+	"fill. CPU + RSX and Everything: with RSX + VRAM - the whole console at once.",
 	"#What is measured",
 	"Throughput per part and its history. SPU busy: the share of the time the SPEs compute. Clock: the PPU timer "
 	"against a time server (NTP). Cell clock: each SPE times an FMA chain of known cycles. RAM latency: one "
-	"128-byte read. Temperatures and fan: webMAN. RSX: each unit alone at the start, then its share of that "
-	"(ALU, blend, vertex); RSX busy by its own time stamps - a picture stays two TV frames, so it waits for the TV "
-	"only briefly. The app changes no clock.",
+	"128-byte read. Temperatures and fan: webMAN. RSX and VRAM: their clocks from lv1 once a second, as webMAN reads them "
+	"(else the shader's rate and the copy's GB/s), each unit alone at the start and then its share of that (ALU, blend, VRAM copy, vertex); RSX busy by its own time stamps. In an emulator the "
+	"figures are the host's. The app changes no clock.",
 	"#Errors and verdict",
 	"Every result is checked (heat: the first result of each job is its reference; RAM: every byte against its "
 	"pattern; RSX: a check tile each of the shader, the fill and the vertices every 4th picture, bit for bit; VRAM: every 64 KB of "
-	"the 16 MB texture against what the PPU wrote). Passed: no error, nothing hangs, CPU and RSX below 85`C (there it "
-	"stops), the timer within 0.1 % of NTP.",
+	"the 16 MB texture and of its copy against what the PPU wrote). Passed: no error, nothing hangs, CPU and RSX below 85`C (there it "
+	"stops), the timer within 0.1 % of NTP. For overclocking: errors don't stop the test - screen and log say when "
+	"the first came; the log adds each one's RSX temperature and clocks, and the bits that keep failing.",
 	"#Values (a reference PS3)",
 	"CPU max: SPEs 152.5 GFLOP/s (99.5 % of the peak), PPU 23.3 (91 %), CPU 64`C after 15 min at fan 32 %. "
 	"CPU + RAM: 97.7 GFLOP/s + 17.5 GB/s. RSX: shader 185.7 GFLOP/s alone. Timer -0.0031 %.",

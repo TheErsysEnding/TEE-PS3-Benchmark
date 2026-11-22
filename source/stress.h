@@ -8,10 +8,13 @@
        shuffles, both pipelines every cycle), both PPU threads on a heat kernel of their own (VMX).
      - MAX+RAM: the same, while the SPUs' DMA units write regions of the RAM and read them back at
        full speed, every quadword checked - for the memory controller and the RAM.
-     - RSX (V9, V0.7): the graphics chip alone - a shader of multiply-adds over tiles off the screen,
+     - RSX core (V9, V0.7): the graphics chip alone - a shader of multiply-adds over tiles off the screen,
        full-screen texture and blend layers, the VRAM read back - as much as it gets through between
        two flips, everything checked (rsx_load.h). The Cell only feeds it.
-     - MAX+RSX and ALL (V0.6): MAX, or MAX+RAM, with the RSX load on top - the whole console.
+     - VRAM (V1.0): the RSX copies a 16 MB texture texel for texel into a second 16 MB, as fast as its
+       memory goes, slices of the copy read back and checked - the graphics memory alone.
+     - RSX + VRAM (V1.0): both - the copy with multiply-adds on the side, the shader and the fill.
+     - MAX+RSX and ALL (V0.6): MAX, or MAX+RAM, with RSX + VRAM on top - the whole console.
    Before the load starts, every SPU measures the Cell's clock and SPU 0 the RAM's latency.
    Should webMAN report the CPU or the RSX at STRESS_TEMP_STOP or hotter, the test stops at once.
    stress_run() blocks for the whole test, so the bench runner thread calls it; the screen reads
@@ -23,13 +26,16 @@
 
 enum { STRESS_IDLE, STRESS_PREPARING, STRESS_RUNNING, STRESS_STOPPING, STRESS_DONE };
 enum { STRESS_NONE, STRESS_PASSED, STRESS_FAILED, STRESS_CANCELLED };
-enum { STRESS_MIXED, STRESS_MAX, STRESS_MAX_RAM, STRESS_RSX, STRESS_MAX_RSX, STRESS_ALL, STRESS_LOADS };
+enum { STRESS_MIXED, STRESS_MAX, STRESS_MAX_RAM, STRESS_RSX, STRESS_VRAM, STRESS_RSX_VRAM, STRESS_MAX_RSX, STRESS_ALL,
+       STRESS_LOADS };
 /* the SPU parts in the order of the bench tests (BENCH_MANDEL .. BENCH_HEAT_RAM), then the PPU threads,
-   then the RSX: its shader tiles, and (V0.7) its fill layers with the VRAM check */
+   then the RSX: its shader tiles, (V0.7) its fill layers with the VRAM check, (V0.9) its vertices and (V1.0)
+   the VRAM copy */
 enum { PART_SPU_FLOAT, PART_SPU_INT, PART_SPU_MEM, PART_SPU_HEAT, PART_SPU_RAM, PART_PPU_1, PART_PPU_2, PART_RSX,
-       PART_RSX_FILL, PART_RSX_VERT, STRESS_PARTS };
-/* what a part's rate counts: million iterations/s, MB/s, MB/s shown as GB/s, GFLOP/s, G pixels/s */
-enum { UNIT_ITER, UNIT_MB, UNIT_GB, UNIT_GFLOP, UNIT_GPIX };
+       PART_RSX_FILL, PART_RSX_VERT, PART_RSX_COPY, STRESS_PARTS };
+/* what a part's rate counts: million iterations/s, MB/s, MB/s shown as GB/s, GFLOP/s, G pixels/s, (V1.0) GB/s in
+   10^9 bytes (the VRAM copy, as graphics memory is quoted) */
+enum { UNIT_ITER, UNIT_MB, UNIT_GB, UNIT_GFLOP, UNIT_GPIX, UNIT_GBD };
 
 #define STRESS_HISTORY      120   /* bars; once full, two become one and a bar stands for twice the time */
 #define STRESS_CLOCK_LIMIT  0.1   /* % the timer may differ from the time server and still pass */
@@ -75,6 +81,8 @@ typedef struct {
 	/* from webMAN: the hottest temperatures and the fan's range, -1 if it never answered */
 	int temp_cpu_max, temp_rsx_max, fan_min, fan_max;
 	int too_hot;                         /* stopped at STRESS_TEMP_STOP: 1 the CPU, 2 the RSX */
+	/* V1.0 (5th build): the RSX's clocks during the test as lv1 has them (once a second), MHz; 0: not known */
+	int lv1_core_min, lv1_core_max, lv1_vram_min, lv1_vram_max;
 	/* the RSX load: its shader's rate alone at the start (rsx_load's probe); how much of the time the RSX
 	   was busy (V0.8: by its own time stamps when rsx_timed - all its work, the screen's too; else by the
 	   probe's timings, shader + fill), the shader's and the fill's shares, the share it waited at the flip;
@@ -84,6 +92,13 @@ typedef struct {
 	/* V0.9: each of the RSX's units against what it managed alone at the start (rsx_load's probe), %; 0 when
 	   not measured: the pixel units' arithmetic (shader tiles and fill pixels), the blending, the vertex units */
 	double rsx_alu_pct, rsx_rop_pct, rsx_vert_pct;
+	/* V1.0: the VRAM copy against the plain copy's rate alone (%; 0 when it does not run), copy passes a picture,
+	   slices of the copy read back */
+	double rsx_vram_pct, rsx_copies_per_picture;
+	uint64_t copy_slices;
+	/* V1.0, for overclockers: when the first error came (us into the test) and in which part (-1: none yet) */
+	uint64_t first_error_us;
+	int first_error_part;
 	int rsx_timed, rsx_hang;
 	uint64_t rsx_checks, vram_slices;
 	char verdict[112];
@@ -91,8 +106,12 @@ typedef struct {
 
 const stress_status *stress_get(void);
 
-/* for the main thread, every frame: whether the RSX load is to run (it feeds it, see rsx_load.h) */
+/* for the main thread, every frame: whether the RSX load is to run (it feeds it, see rsx_load.h), and in which
+   mode (RSXMODE_*) */
 int stress_rsx_wanted(void);
+int stress_rsx_mode(void);
+/* V1.0: a load's RSX mode (RSXMODE_*, -1: no RSX load) */
+int stress_load_rsx_mode(int load);
 
 /* the whole test; ends after duration_s (0: never), with stress_cancel(), at STRESS_TEMP_STOP or once
    *quit is set */
@@ -104,9 +123,10 @@ void stress_cancel(void);
    whether it drew the frame anew (1) or showed the last one again (0) */
 void stress_screen_frame(uint64_t busy_ticks, uint32_t sleeps, int drawn);
 
-/* the load's name for the log and the verdict: MIXED, MAX, MAX+RAM, RSX, MAX+RSX, ALL */
+/* the load's name for the log and the verdict: MIXED, MAX, MAX+RAM, RSX, VRAM, RSX+VRAM, MAX+RSX, ALL */
 const char *stress_load_name(int load);
-/* its name on the screen and in the verdict: Mixed, CPU max, CPU + RAM, RSX, CPU + RSX, Everything */
+/* its name on the screen and in the verdict: Mixed, CPU max, CPU + RAM, RSX core, VRAM, RSX + VRAM, CPU + RSX,
+   Everything */
 const char *stress_load_title(int load);
 /* what a load keeps busy */
 int stress_load_cpu(int load);

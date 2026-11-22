@@ -25,6 +25,7 @@
 #include "bench_log.h"
 #include "gfx.h"
 #include "info.h"
+#include "lv1_clock.h"
 #include "ntp.h"
 #include "rsx_load.h"
 #include "scene.h"
@@ -34,10 +35,12 @@
 
 SYS_PROCESS_PARAM(1001, 0x100000);
 
-#define VERSION  "V0.9 BETA"   /* the app's own numbering since V0.5 (the work before was V1-V9.0) */
+#define VERSION  "V1.0"   /* the app's own numbering since V0.5 (the work before was V1-V9.0) */
 #define PADS     7
 #define CONFIGS  (BENCH_MAX_SPUS + 1)   /* 0 = PPU, 1..6 SPEs */
 #define NOTE_US  4000000                /* how long the note after a screenshot stays */
+#define GUARD_NOTE_US 20000000          /* V1.0: how long the note of a safe start stays */
+#define GUARD_FRAMES  120               /* V1.0: frames until the start counts as through (two seconds) */
 #define STRESS_DRAW_EVERY  8             /* the pixel font: while the stress test runs, every 8th frame */
 #define STRESS_DRAW_UI     2             /* the textured interface: every 2nd frame (30 a second) */
 
@@ -535,6 +538,16 @@ static float tag_w(const char *s)
 	return ui_text_w(UI_SMALL, s) + 28.0f;
 }
 
+/* V1.0: a narrower one, for rows of four */
+static float tag_small(float x, float cy, const char *s, uint32_t argb)
+{
+	float w = ui_text_w(UI_SMALL, s) + 16.0f;
+
+	ui_round(x, cy - 15.0f, w, 30.0f, 8.0f, mix(K_CARD, argb, 0.2f));
+	text_mid(x + 8.0f, cy, UI_SMALL, argb, s);
+	return x + w + 6.0f;
+}
+
 /* the title top left, a pill after it and a line under it */
 static void header(const char *title, const char *pill, uint32_t pill_rgb, const char *sub)
 {
@@ -733,7 +746,7 @@ static void menu_result(int entry, char *buf, size_t len, uint32_t *rgb)
 			*rgb = s->result == STRESS_PASSED ? K_GOOD : s->result == STRESS_FAILED ? K_BAD : K_ACCENT;
 			return;
 		}
-		snprintf(buf, len, "6 loads");
+		snprintf(buf, len, "%d loads", STRESS_LOADS);
 		*rgb = K_FAINT;
 		return;
 	default:
@@ -776,16 +789,27 @@ static void menu_card(int i, float x, float y)
 	/* the foot: for what it runs on the left, its last result on the right - the tags only where both fit */
 	menu_result(i, res, sizeof(res), &res_rgb);
 	room = CARD_W - 56.0f - ui_text_w(UI_LABEL, res) - 16.0f;
-	ui_text_right(x + CARD_W - 28.0f, foot - ui_cap(UI_LABEL) / 2.0f, UI_LABEL, res_rgb, res);
-	if (i == M_FULLLOAD) {
-		tw = tag_w("CPU") + tag_w("RAM") + tag_w("RSX");
-		if (tw <= room) {
-			float tx2 = tag(x + 28.0f, foot, "CPU", K_ACCENT);
-			tx2 = tag(tx2, foot, "RAM", K_RAM);
-			tag(tx2, foot, "RSX", K_RSX);
+	if (i == M_FULLLOAD) {   /* V1.0: with the VRAM - in the narrow tags when the wide ones don't fit */
+		static const char *const PART[4] = { "CPU", "RAM", "RSX", "VRAM" };
+		static const uint32_t PART_RGB[4] = { K_ACCENT, K_RAM, K_RSX, K_RAM };
+		float sw = 0.0f, tx2 = x + 28.0f;
+
+		tw = 0.0f;
+		for (int k = 0; k < 4; k++) {
+			tw += tag_w(PART[k]);
+			sw += ui_text_w(UI_SMALL, PART[k]) + 22.0f;
 		}
+		/* "8 loads" gives way to the tags; a result never does */
+		if (sw > room && res_rgb == K_FAINT) {
+			res[0] = 0;
+			room = CARD_W - 56.0f;
+		}
+		ui_text_right(x + CARD_W - 28.0f, foot - ui_cap(UI_LABEL) / 2.0f, UI_LABEL, res_rgb, res);
+		for (int k = 0; k < 4 && (tw <= room || sw <= room); k++)
+			tx2 = tw <= room ? tag(tx2, foot, PART[k], PART_RGB[k]) : tag_small(tx2, foot, PART[k], PART_RGB[k]);
 		return;
 	}
+	ui_text_right(x + CARD_W - 28.0f, foot - ui_cap(UI_LABEL) / 2.0f, UI_LABEL, res_rgb, res);
 	if (i == M_RESULTS)
 		return;
 	if (i == M_SERIES && spus)
@@ -798,26 +822,106 @@ static void menu_card(int i, float x, float y)
 		tag(x + 28.0f, foot, who, dim ? K_FAINT : K_SOFT);
 }
 
+/* V1.0 (5th build): the RSX's clocks as lv1 has them - read at the start, then once a second (CLOCK_POLL_US): webMAN
+   can change them while the app runs, the screen shows them as they are now and the log every change */
+static lv1_clocks hv;
+#ifdef LV1_FAKE
+#define CLOCKS_HIDDEN() 0   /* the lv1 test build (LV1TEST=1) shows its clocks in RPCS3 too */
+#else
+#define CLOCKS_HIDDEN() (rsxload_get()->emulator)   /* an emulator's figures are the host's */
+#endif
+#define CLOCK_POLL_US    1000000
+#define CLOCK_LOG_LINES  200      /* changes logged at most (a clock that kept flickering would fill the log) */
+
+/* V1.0: the RSX's clock - as lv1 has it now, else measured (its shader's rate at the start); 0 when neither */
+static double rsx_clock(void)
+{
+	return hv.read ? (double)hv.core_mhz : rsxload_get()->rsx_mhz;
+}
+
+/* the change between two readings, for the log: "RSX core 500 -> 600 MHz, VRAM 650 -> 700 MHz" */
+static void log_clock_change(const lv1_clocks *was, const lv1_clocks *now)
+{
+	static int lines;
+	char b[160] = "";
+	int n = 0;
+
+	if (lines >= CLOCK_LOG_LINES)
+		return;
+	if (now->core_mhz != was->core_mhz)
+		n += snprintf(b + n, sizeof(b) - (size_t)n, "RSX core %d -> %d MHz", was->core_mhz, now->core_mhz);
+	if (now->vram_mhz != was->vram_mhz)
+		n += snprintf(b + n, sizeof(b) - (size_t)n, "%sVRAM %d -> %d MHz", n ? ", " : "", was->vram_mhz, now->vram_mhz);
+	if (now->vram2_mhz != was->vram2_mhz && n < (int)sizeof(b))
+		snprintf(b + n, sizeof(b) - (size_t)n, "%ssecond VRAM clock %d -> %d MHz", n ? ", " : "", was->vram2_mhz,
+		         now->vram2_mhz);
+	if (++lines == CLOCK_LOG_LINES)
+		log_line("Clocks from lv1 changed: %s - the last change this log shows", b);
+	else
+		log_line("Clocks from lv1 changed: %s", b);
+}
+
+/* V1.0: the VRAM next to the RSX - its clock as lv1 has it now (5th build; both clocks when they differ), else
+   measured, else the copy's GB/s alone at the start; 0 when none */
+static int vram_text(char *b, size_t n, const char *pre)
+{
+	const rsxload_status *r = rsxload_get();
+
+	if (hv.read && hv.vram2_mhz > 0 && hv.vram2_mhz != hv.vram_mhz)
+		return snprintf(b, n, "%sVRAM %d/%d MHz", pre, hv.vram_mhz, hv.vram2_mhz) > 0;
+	if (hv.read)
+		return snprintf(b, n, "%sVRAM %d MHz", pre, hv.vram_mhz) > 0;
+	if (r->vram_mhz > 0.0)
+		return snprintf(b, n, "%sVRAM %.0f MHz", pre, r->vram_mhz) > 0;
+	if (r->copy_gbs > 0.0)
+		return snprintf(b, n, "%sVRAM %.1f GB/s", pre, r->copy_gbs) > 0;
+	b[0] = 0;
+	return 0;
+}
+
 static void draw_menu(uint64_t now)
 {
-	char buf[64];
+	char buf[64], spe[32];
 	int spus = bench_spus();
 	float r = RIGHT, x = LEFT, cy = 190.0f;
 
 	header("TEE PS3 Benchmark", VERSION, K_ACCENT, "by " CHANNEL_NAME);   /* the channel: here its name, the link in the key help */
-	if (start_latency_ns > 0.0) {
-		snprintf(buf, sizeof(buf), "RAM %.0f ns", start_latency_ns);
-		r = chip(r, buf, 0, K_SOFT);
-	}
-	if (start_mhz > 0.0) {
-		snprintf(buf, sizeof(buf), "Cell %.0f MHz", start_mhz);
-		r = chip(r, buf, 0, K_SOFT);
-	}
 	if (spus)
-		snprintf(buf, sizeof(buf), "%d SPEs ready", spus);
+		snprintf(spe, sizeof(spe), "%d SPEs ready", spus);
 	else
-		snprintf(buf, sizeof(buf), "SPEs not started");
-	chip(r, buf, spus ? K_GOOD : K_BAD, K_TEXT);
+		snprintf(spe, sizeof(spe), "SPEs not started");
+	/* V1.0: in an emulator its figures are the host's - one chip says so instead of a clock no PS3 has */
+	if (CLOCKS_HIDDEN()) {
+		r = chip(r, "Emulator - host figures", K_ACCENT, K_SOFT);
+	} else {
+		/* Cell, RSX, VRAM, RAM from the left, after the SPEs; they must stay right of the version pill
+		   (header()'s layout): first "6 SPEs" for "6 SPEs ready", then without the RAM */
+		char clk[4][32];
+		float pill_end = LEFT + 30.0f + ui_text_w(UI_TITLE, "TEE PS3 Benchmark") + 20.0f + ui_text_w(UI_LABEL, VERSION) +
+		                 32.0f + 24.0f, need = 0.0f;
+		int n = 0, ram = -1;
+
+		if (start_latency_ns > 0.0) {
+			ram = n;
+			snprintf(clk[n++], sizeof(clk[0]), "RAM %.0f ns", start_latency_ns);
+		}
+		if (vram_text(clk[n], sizeof(clk[0]), ""))
+			n++;
+		if (rsx_clock() > 0.0)   /* V1.0: measured, as the Cell's (else lv1's) */
+			snprintf(clk[n++], sizeof(clk[0]), "RSX %.0f MHz", rsx_clock());
+		if (start_mhz > 0.0)
+			snprintf(clk[n++], sizeof(clk[0]), "Cell %.0f MHz", start_mhz);
+		for (int i = 0; i < n; i++)
+			need += ui_text_w(UI_LABEL, clk[i]) + 36.0f + 12.0f;
+		if (spus && RIGHT - need - ui_text_w(UI_LABEL, spe) - 58.0f < pill_end)
+			snprintf(spe, sizeof(spe), "%d SPEs", spus);
+		if (ram >= 0 && RIGHT - need - ui_text_w(UI_LABEL, spe) - 58.0f < pill_end)
+			clk[ram][0] = 0;
+		for (int i = 0; i < n; i++)
+			if (clk[i][0])
+				r = chip(r, clk[i], 0, K_SOFT);
+	}
+	chip(r, spe, spus ? K_GOOD : K_BAD, K_TEXT);
 
 	/* PPU or 1..6 SPEs for the tests */
 	x += text_mid(x, cy, UI_BODY, K_DIM, "Run on") + 24.0f;
@@ -989,8 +1093,9 @@ static void draw_results(uint64_t now)
 
 /* ---- the stress test ------------------------------------------------------------------------------ */
 
-#define LOAD_W  560.0f
+#define LOAD_W  414.0f      /* V1.0: eight loads, 4 x 2 like the menu */
 #define LOAD_H  206.0f
+#define LOAD_COLS 4
 #define LOAD_Y  246.0f
 #define RING_X  400.0f
 #define RING_Y  520.0f
@@ -999,37 +1104,61 @@ static void draw_results(uint64_t now)
 #define RX      760.0f      /* the right column of the running test */
 #define RW      (RIGHT - RX)
 
-static const int LOAD_ICON[STRESS_LOADS] = { UI_ICON_REPEAT, UI_ICON_FLAME, UI_ICON_CHIP, UI_ICON_GPU, UI_ICON_GPU,
-                                             UI_ICON_FLAME };
-static const uint32_t LOAD_RGB[STRESS_LOADS] = { K_ACCENT, K_ACCENT, K_RAM, K_RSX, K_RSX, K_HOT };
+static const int LOAD_ICON[STRESS_LOADS] = { UI_ICON_REPEAT, UI_ICON_FLAME, UI_ICON_CHIP, UI_ICON_GPU, UI_ICON_CHIP,
+                                             UI_ICON_GPU, UI_ICON_GPU, UI_ICON_FLAME };
+static const uint32_t LOAD_RGB[STRESS_LOADS] = { K_ACCENT, K_ACCENT, K_RAM, K_RSX, K_RAM, K_RSX, K_RSX, K_HOT };
 static const char *const LOAD_DESC[STRESS_LOADS] = {
-	"All three benchmarks on the Cell, moving on every 10 s",
+	"The three benchmarks on the Cell, moving on every 10 s",
 	"Maximum heat: every SPE and both PPU threads",
 	"CPU max while the RAM is written and read back",
-	"The graphics chip alone: shader, fill, vertices and VRAM",
-	"CPU max and the RSX load together",
-	"CPU, RAM and RSX at once - the whole console"
+	"The graphics chip's units: shader, fill, blending",
+	"The graphics memory: 16 MB copied again and again",
+	"The graphics chip and its memory at once",
+	"CPU max with RSX + VRAM on top",
+	"CPU, RAM, RSX and VRAM - the whole console"
 };
 
+/* V1.0: the RSX's own units, its memory */
+static int load_core(int load)
+{
+	int m = stress_load_rsx_mode(load);
+
+	return m == RSXMODE_CORE || m == RSXMODE_BOTH;
+}
+
+static int load_vram(int load)
+{
+	return stress_load_rsx_mode(load) >= RSXMODE_VRAM;
+}
+
+/* a narrower tag (V1.0: four fit on a load's card) */
 static float load_tags(float x, float cy, int load)
 {
 	if (stress_load_cpu(load))
-		x = tag(x, cy, "CPU", K_ACCENT);
+		x = tag_small(x, cy, "CPU", K_ACCENT);
 	if (stress_load_ram(load))
-		x = tag(x, cy, "RAM", K_RAM);
-	if (stress_load_rsx(load))
-		x = tag(x, cy, "RSX", K_RSX);
+		x = tag_small(x, cy, "RAM", K_RAM);
+	if (load_core(load))
+		x = tag_small(x, cy, "RSX", K_RSX);
+	if (load_vram(load))
+		x = tag_small(x, cy, "VRAM", K_RAM);
 	return x;
 }
 
 /* what runs where under a load */
 static void load_what(char *buf, size_t len, int load, int spus)
 {
-	const char *rsx = stress_load_rsx(load) ? " - RSX: shader, fill, vertices, VRAM check" : "";
+	const char *rsx = stress_load_rsx(load) ? " - RSX: shader, fill, VRAM copy + MAD" : "";
 
 	if (load == STRESS_RSX)
 		snprintf(buf, len, "RSX: multiply-add shader, texture and blend layers, vertices, the VRAM read back - all "
 		         "checked, the Cell only feeds it");
+	else if (load == STRESS_VRAM)
+		snprintf(buf, len, "RSX: the 16 MB texture copied texel for texel into a second 16 MB, as fast as the VRAM goes - "
+		         "slices of both read back and checked, the Cell only feeds it");
+	else if (load == STRESS_RSX_VRAM)
+		snprintf(buf, len, "RSX: the VRAM copy with multiply-adds on the side, the shader and the fill layers - the chip "
+		         "and its memory at once, all checked");
 	else if (!spus)
 		snprintf(buf, len, "SPEs not started - PPU only: %s%s", load == STRESS_MIXED ?
 		         "thread 1 ChaCha20, thread 2 VMX Mandelbrot" : "2 threads VMX heat kernel", rsx);
@@ -1068,7 +1197,7 @@ static void draw_stress_setup(const stress_status *s)
 	key_pill(x, cy, "R1");
 
 	for (int i = 0; i < STRESS_LOADS; i++) {
-		float cx = LEFT + (float)(i % 3) * (LOAD_W + 24.0f), cy0 = LOAD_Y + (float)(i / 3) * (LOAD_H + 24.0f);
+		float cx = LEFT + (float)(i % LOAD_COLS) * (LOAD_W + 24.0f), cy0 = LOAD_Y + (float)(i / LOAD_COLS) * (LOAD_H + 24.0f);
 		int sel = i == load_pick;
 		uint32_t tint = LOAD_RGB[i];
 
@@ -1088,9 +1217,18 @@ static void draw_stress_setup(const stress_status *s)
 	/* what runs where, and what the start measured */
 	ui_round(LEFT, 706.0f, WIDE, 146.0f, 22.0f, K_CARD);
 	ui_text(LEFT + 32.0f, 730.0f, UI_SMALL, K_DIM, "What runs");
-	if (start_mhz > 0.0) {
-		snprintf(buf, sizeof(buf), "Measured at the start: Cell %.1f MHz, RAM latency %.0f ns", start_mhz,
-		         start_latency_ns);
+	if (CLOCKS_HIDDEN()) {
+		ui_text_right(RIGHT - 32.0f, 730.0f, UI_SMALL, K_ACCENT, "In an emulator: clocks, latency and rates are the host's");
+	} else if (start_mhz > 0.0) {
+		char vr[32];
+
+		vram_text(vr, sizeof(vr), ", ");
+		if (rsx_clock() > 0.0)
+			snprintf(buf, sizeof(buf), "Cell %.1f MHz, RSX %.0f MHz%s, RAM latency %.0f ns", start_mhz, rsx_clock(), vr,
+			         start_latency_ns);
+		else
+			snprintf(buf, sizeof(buf), "Measured at the start: Cell %.1f MHz, RAM latency %.0f ns", start_mhz,
+			         start_latency_ns);
 		ui_text_right(RIGHT - 32.0f, 730.0f, UI_SMALL, K_DIM, buf);
 	}
 	load_what(buf, sizeof(buf), load_pick, bench_spus());
@@ -1141,7 +1279,7 @@ static void draw_stress_run(const stress_status *s, int run)
 	int load = live ? s->load : request_load, spus = bench_spus(), row = 0;
 	uint32_t rc = !done ? K_ACCENT : s->result == STRESS_PASSED ? K_GOOD : s->result == STRESS_FAILED ? K_BAD : K_ACCENT;
 	uint32_t secs = live ? s->duration_s : request_secs;
-	char a[32], b[48], buf[192];
+	char a[32], b[96], buf[192];
 	float inner = RING_R - RING_W / 2.0f - 24.0f, f = 0.0f, x;
 
 	if (load < 0 || load >= STRESS_LOADS)
@@ -1228,7 +1366,19 @@ static void draw_stress_run(const stress_status *s, int run)
 			checked += s->jobs[p];
 		if (live) {
 			snprintf(a, sizeof(a), "%u", s->errors_total);
-			snprintf(b, sizeof(b), "%llu results checked", (unsigned long long)checked);
+			if (s->errors_total && s->first_error_part >= 0) {
+				/* V1.0: for overclockers - when and where the first one came */
+				static const char *const SHORT[STRESS_PARTS] = { "SPU float", "SPU integer", "SPU memory", "SPU heat",
+				                                                 "RAM", "PPU 1", "PPU 2", "RSX shader", "RSX fill/VRAM",
+				                                                 "RSX vertices", "VRAM copy" };
+				uint64_t t = s->first_error_us / 1000000;
+
+				snprintf(b, sizeof(b), "first at %02u:%02u: %s", (unsigned)(t / 60), (unsigned)(t % 60),
+				         SHORT[s->first_error_part]);
+			} else {
+				snprintf(b, sizeof(b), "%llu results checked", (unsigned long long)checked);
+			}
+			clip(b, UI_SMALL, mw - 52.0f);
 			metric(RX, 170.0f, mw, "Errors", a, s->errors_total ? K_BAD : K_GOOD, b);
 		} else {
 			metric(RX, 170.0f, mw, "Errors", "-", K_FAINT, "nothing checked yet");
@@ -1248,8 +1398,16 @@ static void draw_stress_run(const stress_status *s, int run)
 			/* the share of the time the RSX is busy: by its own time stamps (V0.8), else by the probe's timings */
 			if (live && s->rsx_pct > 0.0) {
 				snprintf(a, sizeof(a), s->rsx_timed ? "%.1f %%" : "%.0f %%", s->rsx_pct);
-				/* V0.9: what each unit does against its rate alone */
-				if (s->rsx_alu_pct > 0.0 && s->rsx_vert_pct > 0.0) {
+				/* V0.9: what each unit does against its rate alone; V1.0: the VRAM's, by the copy */
+				if (s->load == STRESS_VRAM && s->rsx_vram_pct > 0.0) {
+					snprintf(b, sizeof(b), "VRAM %.0f %% of its copy rate", s->rsx_vram_pct);
+				} else if (s->rsx_alu_pct > 0.0 && s->rsx_vram_pct > 0.0) {
+					snprintf(b, sizeof(b), "ALU %.0f, blend %.0f, VRAM %.0f %%", s->rsx_alu_pct, s->rsx_rop_pct,
+					         s->rsx_vram_pct);
+					if (ui_text_w(UI_SMALL, b) > mw - 52.0f)
+						snprintf(b, sizeof(b), "ALU %.0f blend %.0f VRAM %.0f", s->rsx_alu_pct, s->rsx_rop_pct,
+						         s->rsx_vram_pct);
+				} else if (s->rsx_alu_pct > 0.0 && s->rsx_vert_pct > 0.0) {
 					snprintf(b, sizeof(b), "ALU %.0f, blend %.0f, vertex %.0f %%", s->rsx_alu_pct, s->rsx_rop_pct,
 					         s->rsx_vert_pct);
 					if (ui_text_w(UI_SMALL, b) > mw - 52.0f)
@@ -1313,7 +1471,7 @@ static void draw_stress_run(const stress_status *s, int run)
 			ry = py + 70.0f + (float)row++ * pitch;
 			text_mid(RX + 28.0f, ry, fit(UI_BODY, c_who - RX - 44.0f, stress_part_name(p, load)), K_TEXT,
 			         stress_part_name(p, load));
-			if (p == PART_RSX || p == PART_RSX_FILL || p == PART_RSX_VERT)
+			if (p == PART_RSX || p == PART_RSX_FILL || p == PART_RSX_VERT || p == PART_RSX_COPY)
 				snprintf(a, sizeof(a), "RSX");
 			else if (p >= PART_PPU_1)
 				snprintf(a, sizeof(a), "PPU thread %d", p - PART_PPU_1 + 1);
@@ -1379,10 +1537,20 @@ static void draw_stress_run(const stress_status *s, int run)
 		float right_w = 0.0f;
 
 		ui_round(LEFT, BAR_Y, WIDE, BAR_H, 18.0f, K_CARD);
-		if (live && s->probe_ok) {
+		if (live && CLOCKS_HIDDEN()) {
+			right_w = ui_text_right(RIGHT - 30.0f, BAR_Y + BAR_H / 2.0f - ui_cap(UI_LABEL) / 2.0f, UI_LABEL, K_ACCENT,
+			                        "Emulator - host figures");
+		} else if (live && s->probe_ok) {
 			double mhz = s->clock_valid ? s->cell_mhz * (1.0 + s->clock_dev_pct / 100.0) : s->cell_mhz;
 
-			snprintf(b, sizeof(b), "Cell %.1f MHz - RAM %.0f ns", mhz, s->ram_latency_ns);
+			char vr[32];
+
+			vram_text(vr, sizeof(vr), " - ");
+			if (rsx_clock() > 0.0)
+				snprintf(b, sizeof(b), "Cell %.1f MHz - RSX %.0f MHz%s - RAM %.0f ns", mhz, rsx_clock(), vr,
+				         s->ram_latency_ns);
+			else
+				snprintf(b, sizeof(b), "Cell %.1f MHz - RAM %.0f ns", mhz, s->ram_latency_ns);
 			right_w = ui_text_right(RIGHT - 30.0f, BAR_Y + BAR_H / 2.0f - ui_cap(UI_LABEL) / 2.0f, UI_LABEL, K_TEXT, b);
 		}
 		load_what(buf, sizeof(buf), load, spus);
@@ -1515,13 +1683,13 @@ static void keys(int pressed)
 				duration_pick--;
 			if ((pressed & PAD_R1) && duration_pick < DURATION_COUNT - 1)
 				duration_pick++;
-			/* the loads, 3 x 2 */
+			/* the loads, 4 x 2 */
 			if (pressed & PAD_LEFT)
 				load_pick = (load_pick + STRESS_LOADS - 1) % STRESS_LOADS;
 			if (pressed & PAD_RIGHT)
 				load_pick = (load_pick + 1) % STRESS_LOADS;
 			if (pressed & (PAD_UP | PAD_DOWN))
-				load_pick = (load_pick + 3) % STRESS_LOADS;
+				load_pick = (load_pick + LOAD_COLS) % STRESS_LOADS;
 			if ((pressed & PAD_CROSS) && !busy())
 				start_stress();
 			if (pressed & PAD_CIRCLE) {
@@ -1624,8 +1792,8 @@ static void draw_note(uint64_t now)
 
 #ifdef BENCH_AUTOTEST
 /* RPCS3 runs this build: it presses the buttons like a player would - menu, info page, the series from
-   PPU to 6 SPEs, a 20 s stress test with each of the six loads (CPU max, CPU + RAM, RSX, CPU + RSX,
-   Everything, Mixed) - takes pictures on the way and quits. Each step waits for its moment. */
+   PPU to 6 SPEs, a 20 s stress test with each of the eight loads (CPU max, CPU + RAM, RSX core, VRAM,
+   RSX + VRAM, CPU + RSX, Everything, Mixed) - takes pictures on the way and quits. Each step waits for its moment. */
 enum { AT_IDLE, AT_PAUSE, AT_PRESS, AT_SHOT, AT_SHOT_NOTE, AT_SHOT_FAIL, AT_SHOT_SHOWN, AT_STRESS_RUNNING, AT_STRESS_DONE,
        AT_QUIT };
 
@@ -1680,7 +1848,9 @@ static const at_step SCRIPT[] = {
 	{ AT_SHOT, 0 }, { AT_PAUSE, 1200 },                      /* 8: the setup, 20 s and CPU max chosen */
 	AT_LOAD_RUN,                                             /* CPU max */
 	AT_LOAD_RUN,                                             /* CPU + RAM */
-	AT_LOAD_RUN,                                             /* RSX */
+	AT_LOAD_RUN,                                             /* RSX core */
+	AT_LOAD_RUN,                                             /* VRAM */
+	AT_LOAD_RUN,                                             /* RSX + VRAM */
 	AT_LOAD_RUN,                                             /* CPU + RSX */
 	{ AT_SHOT, 0 }, { AT_PAUSE, 1200 },                      /* the setup with Everything chosen */
 	AT_LOAD_RUN,                                             /* Everything */
@@ -1768,6 +1938,9 @@ static int rsx_start(void)
 	r = rsxload_get();
 	if (r->selftest_failed)
 		return -1;
+	if (r->emulator)
+		log_line("EMULATOR: the RSX's timings are impossible on a PS3 (it writes its labels before the work is done) - the "
+		         "clocks, the latency and every rate in this log describe the host computer, not a PS3");
 	if (r->probe_ok)
 		log_line("RSX shader alone: %.2f G multiply-adds a second on four floats = %.1f GFLOP/s (%.1f a clock at 500 MHz), "
 		         "as the load runs it %.1f GFLOP/s, a %dx%d tile in %.0f us (%d tiles with 256 and with 64 a pixel: %.2f "
@@ -1796,30 +1969,74 @@ int main(void)
 	sys_ppu_thread_t thread;
 	u64 ret;
 	int last = 0, spus_ok, want_shot = 0, shot_pending = 0, keep_note = 0, fail_shot = 0, shot_fail = 0;
-	int since_draw = 0, note_drawn = 0;
+	int since_draw = 0, note_drawn = 0, frames = 0;
 	uint32_t shot_ticket = 0;
-	uint64_t shot_at = 0;
+	uint64_t shot_at = 0, clock_read_us = 0;
 
-	if (gfx_init() != 0)
-		return 1;
-	ioPadInit(PADS);
-	sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, on_sysutil, NULL);
+	/* V1.0: the log and the start guard first - a start that freezes the console still leaves on the disk how far
+	   it got, and the next start of this build leaves that part out if it can */
 	log_open();
-	log_line("TEE PS3 Benchmark " VERSION " by " CHANNEL_NAME " (" CHANNEL_LINK ") started: picture %dx%d, %s", gfx_width(),
-	         gfx_height(), gfx_selftest());
-	if (rsx_start() != 0) {
-		/* a hung RSX takes every later frame, and the app with it once the command buffer is full (V9.0's
-		   second try froze the console): end at once, so the system resets the RSX */
-		log_line("The RSX did not pass its self-test: the app ends here, so the system can reset the RSX");
+	log_line("TEE PS3 Benchmark " VERSION " by " CHANNEL_NAME " (" CHANNEL_LINK ") started");
+	guard_open();
+	guard_part(GUARD_GRAPHICS);
+	if (gfx_init() != 0) {
+		log_line("The graphics did not start: the app ends here");
 		log_close();
 		return 1;
 	}
+	ioPadInit(PADS);
+	sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, on_sysutil, NULL);
+	log_line("Picture %dx%d, %s", gfx_width(), gfx_height(), gfx_selftest());
+	if (guard_part(GUARD_RSX)) {
+		log_line("RSX load: left out at this start - no RSX loads");
+	} else if (rsx_start() != 0) {
+		/* a hung RSX takes every later frame, and the app with it once the command buffer is full (V9.0's
+		   second try froze the console): end at once, so the system resets the RSX */
+		log_line("The RSX did not pass its self-test: the app ends here, so the system can reset the RSX - the next "
+		         "start of this build leaves out the part it stopped in");
+		log_close();
+		return 1;
+	}
+	/* V1.0 (5th build): the RSX's clocks from lv1 - read only, the same registers webMAN MOD shows */
+	if (guard_part(GUARD_LV1)) {
+		log_line("Clocks from lv1: left out at this start - the screen shows the measured figures");
+	} else if (lv1_clock_read(&hv) == 0) {
+		char v2[40] = "";
+		char meas[64] = "";
+
+		if (hv.vram2_mhz > 0)
+			snprintf(v2, sizeof(v2), ", second VRAM clock %d MHz", hv.vram2_mhz);
+		if (rsxload_get()->rsx_mhz > 0.0)
+			snprintf(meas, sizeof(meas), " - the RSX core measured at the start: %.0f MHz", rsxload_get()->rsx_mhz);
+		log_line("Clocks from lv1 (read only, the registers webMAN MOD shows): RSX core %d MHz, VRAM %d MHz%s%s "
+		         "(%016llx %016llx %016llx)", hv.core_mhz, hv.vram_mhz, v2, meas, (unsigned long long)hv.raw_core,
+		         (unsigned long long)hv.raw_vram, (unsigned long long)hv.raw_vram2);
+		/* the measured core clock as the check: a register read wrongly on some model must not show on the screen */
+		if (rsxload_get()->rsx_mhz > 0.0 && fabs(hv.core_mhz - rsxload_get()->rsx_mhz) > 0.15 * rsxload_get()->rsx_mhz) {
+			log_line("Clocks from lv1: the RSX core's %d MHz does not fit the measured %.0f MHz - these registers do not "
+			         "read here as on the PS3s known; the screen shows the measured figures", hv.core_mhz,
+			         rsxload_get()->rsx_mhz);
+			memset(&hv, 0, sizeof(hv));
+			lv1_clock_forget();
+		}
+	} else if (hv.no_peek) {
+		log_line("Clocks from lv1: not readable - the CFW's lv1 peek (syscall 11) is not there or switched off; the "
+		         "screen shows the measured figures");
+	} else {
+		log_line("Clocks from lv1: not plausible (%016llx %016llx %016llx: RSX core %d MHz, VRAM %d MHz) - the "
+		         "screen shows the measured figures", (unsigned long long)hv.raw_core, (unsigned long long)hv.raw_vram,
+		         (unsigned long long)hv.raw_vram2, 50 * (int)(hv.raw_core >> 8 & 0xFF),
+		         25 * (int)(hv.raw_vram >> 8 & 0xFF));
+		hv.core_mhz = hv.vram_mhz = hv.vram2_mhz = 0;
+	}
+	guard_part(GUARD_UI);
 	if (ui_init() < 0) {
 		log_line("The interface's self-test hung the RSX: the app ends here, so the system can reset the RSX");
 		log_close();
 		return 1;
 	}
 	gfx_reset_target();
+	guard_part(GUARD_SPU);
 	spus_ok = bench_start() == 0;
 	if (spus_ok) {
 		char how[96];
@@ -1830,7 +2047,9 @@ int main(void)
 		log_line("SPU threads NOT started (%d), PPU only", bench_spus());
 	}
 	selected = bench_spus();
-	if (webman_start() == 0) {
+	if (guard_part(GUARD_NET)) {
+		log_line("Network: left out at this start - no webMAN messages, temperatures or fan, no clock check");
+	} else if (webman_start() == 0) {
 		int ntp = ntp_start() == 0;
 		log_line("Network ready: messages, temperatures and fan from webMAN if it runs; %s",
 		         ntp ? "time server for the clock check" : "NO time server thread, the clock is not checked");
@@ -1841,6 +2060,13 @@ int main(void)
 	if (sysThreadCreate(&thread, runner, NULL, 1000, 0x10000, THREAD_JOINABLE, "bench_runner") != 0) {
 		log_line("Test thread could not be started");
 		running = 0;
+	}
+	guard_part(GUARD_FIRST);
+	if (guard_left_out()[0]) {   /* a safe start: the screen says so for a while */
+		snprintf(note, sizeof(note), "Safe start: %s left out - it stopped an earlier start (see the log)",
+		         guard_left_out());
+		note_bad = 1;
+		note_until = (uint64_t)sysGetSystemTime() + GUARD_NOTE_US;
 	}
 
 	while (running) {
@@ -1913,7 +2139,17 @@ int main(void)
 #endif
 		}
 		stress_screen_frame(__gettime() - frame_top, gfx_sleeps(), draw);
-		rsxload_set_active(stress_rsx_wanted() && !system_menu && !system_draw);
+		/* V1.0 (5th build): the RSX's clocks as they are now (webMAN can change them during a test) */
+		if (hv.read && now - clock_read_us >= CLOCK_POLL_US) {
+			lv1_clocks was;
+
+			clock_read_us = now;
+			if (lv1_clock_poll(&hv, &was))
+				log_clock_change(&was, &hv);
+		}
+		if (++frames == GUARD_FRAMES)
+			guard_done();   /* two seconds of pictures: the start is through */
+		rsxload_set_active(stress_rsx_wanted() && !system_menu && !system_draw, stress_rsx_mode());
 		if (draw)
 			gfx_flip();
 		else
@@ -1931,6 +2167,7 @@ int main(void)
 		}
 	}
 
+	guard_done();   /* a quit before the start was through is no stop */
 	quit = 1;
 	stop_requested = 1;
 	bench_cancel();

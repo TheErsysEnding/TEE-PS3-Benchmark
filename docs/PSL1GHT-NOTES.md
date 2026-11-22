@@ -43,6 +43,29 @@ Found while writing TEE PS3 Benchmark with PSL1GHT and a GCC 13 toolchain. Each 
   - The same target in a tile region (`gcmSetTile`, pitch from `gcmGetTiledPitchSize`, here 8192) managed 3.43 G pixels a second.
   - A fill program with two texture reads ran twice as fast there.
 - **Vertex units.** Batches of culled points drawn between full-screen layers did *not* run alongside the pixels (0 % overlap measured), and switching vertex programs costs time.
+- **VRAM is cache-inhibited for the PPU.**
+  - An 8-byte load or store into RSX memory that is not 8-byte aligned raises an alignment exception. On a PS3 that froze the console; RPCS3 does not mind.
+  - GCC copies a 4-byte-aligned struct (such as a 20-byte vertex) with `ld`/`std` at offsets 4 apart.
+  - Build vertex data in main memory and copy it into VRAM through a `volatile u32 *`.
+  - Read that source with `memcpy`, never through a `u32 *`: under strict aliasing, GCC 13 at `-O2` dropped the stores of the floats it thought nobody read.
+  - Never read VRAM back with the PPU.
+  - To check, list the `ld`/`std`/`lfd`/`stfd` instructions in the object files whose offset is not a multiple of 8 and whose base register is not `r1`. Each one must point into main memory.
+- **A tile region must hold whole rows of tiles.**
+  - The RSX lays a tile region out in tiles of 256 bytes × 64 lines, four tiles to a 64 KB block. RPCS3 has a port of the hardware's math in `rpcs3/Emu/RSX/Common/tiled_dma_copy.hpp`.
+  - A 1920x1080 target at pitch 8192 needs 1088 lines (136 blocks). With 1080 lines (135 blocks), the console wrote the target's bottom-right corner (x 1792–1919, lines 1024–1079) up to 47 KB past the region, onto whatever lay there.
+  - RPCS3 drops writes past a region, so it shows nothing.
+  - Size the region as `pitch × align(height, 64)`, rounded up to 64 KB, on a 64 KB aligned base.
+- **Heap.** `rsxMemalign` with an alignment hands out memory from the *top* of the free block, so consecutive allocations sit right below each other. A buffer that overflows hits the one allocated just before it.
+
+## The RSX's clocks (custom firmware)
+
+- **They can be read** through the CFW's lv1 peek (syscall 11 on Cobra / Evilnat), the way webMAN MOD reads them:
+  - byte 6 of `0x28000004028` × 50 MHz: the core;
+  - byte 6 of `0x28000004010` × 25 MHz: the VRAM;
+  - byte 2 of `0x28000004020` × 25 MHz: the second VRAM clock.
+- A stock PS3 reads 500 and 650 MHz. The core value matched the clock measured from the shader's rate, at 500, 651 and 751 MHz.
+- Without the peek, lv2 answers ENOSYS (`0x80010003`, sign-extended). RPCS3 returns it zero-extended.
+- This app only reads these registers.
 
 ## RPCS3 (macOS, MoltenVK) quirks
 
@@ -51,3 +74,4 @@ Found while writing TEE PS3 Benchmark with PSL1GHT and a GCC 13 toolchain. Each 
 - Labels arrive when the FIFO is processed, not when the GPU is done, so shader timings in RPCS3 mean nothing.
 - A new shader's first runs can round 1–3 ulp differently from later ones (interpreter vs. compiled). Take a bit-exact reference from a later run.
 - "ROP reads from r0/h0 without writing to it" is harmless for hand-encoded fragment programs.
+- Rarely, under heavy host load, a copy of a surface comes back as the cleared surface (all `00000000`): RPCS3 copied it before the draw reached its memory.

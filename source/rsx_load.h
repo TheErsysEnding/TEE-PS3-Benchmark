@@ -22,6 +22,14 @@
    - VRAM check (V0.7): every picture 64 KB of that texture are copied back into main memory and compared
      with what the PPU wrote there at the start; the whole 16 MB every 256 pictures. V0.8: the texture is
      swizzled (laid out in small squares, as games keep theirs), the same bytes in memory.
+   - VRAM copy (V1.0): the same 16 MB read through a second, linear texture header and drawn texel for texel
+     (point sampling, no blending) into a 2048x2048 target - 4 bytes read and 4 written a pixel, the VRAM at
+     its limit. Every copy writes the same bytes, so slices of the target can be read back at any time and
+     compared with the PPU's checksums of the texture: two slices a picture. With multiply-adds on the side
+     (V1.0's RSX + VRAM load) the pixel units compute while they wait for the memory: the probe takes the
+     most that keep the copy at 95 % of its rate.
+   The three RSX loads (V1.0): RSX core (shader and computing fill, no copy), VRAM (the copy alone) and
+   RSX + VRAM (shader, computing fill and the copy with multiply-adds) - rsxload_set_active's mode.
    How much a picture (V0.8): the RSX idles from reaching the flip until the TV's vertical blank (on the
    console the wait for the flip holds it, in RPCS3 the flip command). While the load runs a picture stays for two TV frames
    (30 a second), and the RSX's own time stamps (rsx_pace.h) set the load so that the RSX reaches the next
@@ -41,6 +49,10 @@
 #define RSXLOAD_FILL_H      1080
 #define RSXLOAD_TEX         2048  /* the fill's texture, 2048x2048 A8R8G8B8 = 16 MB */
 #define RSXLOAD_FRAMES      2     /* V0.8: TV frames a picture stays while the load runs */
+#define RSXLOAD_COPY        2048  /* V1.0: the copy target, 2048x2048 A8R8G8B8 (a row: 2048 pixels) */
+
+/* V1.0: the RSX load's modes */
+enum { RSXMODE_CORE, RSXMODE_VRAM, RSXMODE_BOTH, RSXMODES };
 
 typedef struct {
 	int ready;                    /* programs and buffers in place */
@@ -89,7 +101,28 @@ typedef struct {
 	   pixels in the probe */
 	int vert_ok, vert_check_ok, vert_batches;
 	double probe_vert_gmad, vert_overlap;
+	/* V1.0: an emulator (the self-test passed, but the shader's and the fill's timings are impossible on a
+	   PS3: an emulator writes the labels before the work) - then clocks, latency and rates describe the host */
+	int emulator;
+	/* V1.0: the RSX's core clock, measured: each shader layout's rate alone against its multiply-adds a clock
+	   on a stock RSX at 500 MHz (the median of the layouts; 0: not measured), and each layout's own figure */
+	double rsx_mhz, variant_mhz[RSXLOAD_VARIANTS];
+	/* V1.0: the VRAM copy - set up and checked (its slices came back as the texture), its target (1: the tile
+	   region; V1.0 keeps it linear), drawn upside down (the RSX's rows the other way round); the plain copy's rate alone (GB/s, 8
+	   bytes a pixel: read + write) and a row's time; the multiply-adds a pixel the RSX + VRAM load gives it,
+	   that program's rate alone and a row's time */
+	int copy_ok, copy_tiled, copy_flip, copy_mads;
+	double copy_gbs, copy_row_us, copy_mad_gbs, copy_mad_row_us;
+	/* V1.0: the VRAM's clock, measured: the plain copy's rate alone against a stock PS3's at 650 MHz (0: not
+	   measured, or no stock reference yet - then copy_gbs is shown) */
+	double vram_mhz;
+	/* V1.0: the mode the load runs (or ran) in, the share of its second part's rows that are copy rows (the
+	   rest fill rows), and that part's row time at the start (fill and copy rows mixed) */
+	int mode;
+	double copy_frac, mix_row_us;
 	volatile uint64_t fmads, vbatches, vmads, vert_checks, vert_errors;
+	/* V1.0: the copy - rows and passes drawn, pixels, its multiply-adds, slices read back and wrong ones */
+	volatile uint64_t copy_rows, copy_passes, copy_pixels, cmads, copy_slices, copy_errors;
 	/* since the start of the app, main thread writes: other threads take differences */
 	volatile uint64_t tiles, mads, frames, checks, check_errors;
 	volatile uint64_t layers, pixels, fill_checks, fill_errors;
@@ -104,7 +137,7 @@ typedef struct {
 	volatile uint64_t ts_pictures, ts_seen, ts_bad;
 	volatile uint64_t progress_tb;        /* timebase when the RSX last finished a picture's load */
 	volatile int active, pending;
-	volatile double tiles_per_picture, layers_per_picture;
+	volatile double tiles_per_picture, layers_per_picture, copies_per_picture;
 	volatile uint64_t last_bad;           /* checksum of the last check tile that differed */
 } rsxload_status;
 
@@ -112,9 +145,15 @@ typedef struct {
 int  rsxload_init(void);
 /* in the main thread before the first frame: self-test, measures, makes the check tiles' references */
 void rsxload_probe(void);
-/* main thread, once a picture before the flip: load on or off (it finishes what it queued) */
-void rsxload_set_active(int on);
+/* main thread, once a picture before the flip: load on or off (it finishes what it queued), and in which mode
+   (RSXMODE_*: taken when the load goes on) */
+void rsxload_set_active(int on, int mode);
+/* the mode's name for the log: "RSX core", "VRAM", "RSX + VRAM" */
+const char *rsxload_mode_name(int mode);
 const rsxload_status *rsxload_get(void);
+/* V1.0 (6th build): the error pattern of each kind of check since the test started (bits, 0 -> 1 or 1 -> 0, the place in
+   a 16-byte memory word) into the log, then cleared; the stress test's summary calls it */
+void rsxload_errpat_log(void);
 /* at the end, after gfx_shutdown (the RSX idle): the fill's tile region given back */
 void rsxload_shutdown(void);
 /* the shader layout's name, for the log and the screen */

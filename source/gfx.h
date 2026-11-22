@@ -28,8 +28,8 @@ void gfx_reflip(void);
 gcmContextData *gfx_context(void);
 void gfx_set_frame_hook(void (*hook)(void));
 void *gfx_host_area(u32 *offset);
-/* main memory the RSX can read and write, from byte start of the mapped area (1-8 MB; the RSX load has
-   4-5 MB, the interface 1-3.1 MB); NULL outside it */
+/* main memory the RSX can read and write, from byte start of the mapped area (1-8 MB, and V1.0 12-20 MB; the
+   RSX load has 4-8 and 12-16 MB, the interface 1-3.1 MB); NULL outside it */
 void *gfx_host_mem(u32 start, u32 size, u32 *offset);
 /* someone else set the clear colour: gfx_rect sets its own again */
 void gfx_forget_clear_color(void);
@@ -58,6 +58,8 @@ const char *gfx_selftest(void);
 
 /* how often a wait on the RSX ran into its timeout; 0 while all is well */
 int gfx_stalls(void);
+/* V1.0: how often the RSX did not reach the command buffer's rewind within 0.5 s (at the start: it is stuck) */
+int gfx_rewind_stalls(void);
 
 /* how often the waits on the RSX have slept so far (each sleep wakes the PPU again), a running count */
 uint32_t gfx_sleeps(void);
